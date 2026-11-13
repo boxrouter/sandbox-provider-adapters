@@ -1,0 +1,10 @@
+amazonaws.com
+cloudfront.net
+googleapis.com
+azurewebsites.net
+blob.core.windows.net
+github.io
+vercel.app
+netlify.app
+pages.dev
+workers.dev
