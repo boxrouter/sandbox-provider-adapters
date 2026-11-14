@@ -162,6 +162,10 @@ jobs:
           set -eu
           server="pr/providers/$PROVIDER/fake_cloud/server.py"
           [ -f "$server" ] || { echo "no fake backend in this folder"; exit 0; }
+          # The fake backend runs its sandboxes as local containers. The runner VM's own metadata
+          # services must stay unreachable from them, as they are at a real provider.
+          sudo iptables -I DOCKER-USER -d 169.254.169.254 -j REJECT
+          sudo iptables -I DOCKER-USER -d 168.63.129.16 -j REJECT
           uv run --no-sync --project "pr/providers/$PROVIDER" python "$server" \
             --port 18080 --state-dir "$RUNNER_TEMP/fake-cloud" > "$RUNNER_TEMP/fake-cloud.log" 2>&1 &
           echo $! >> "$RUNNER_TEMP/pids.txt"
