@@ -43,10 +43,11 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           set -eu
-          git fetch --tags --force origin
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --tags --force "$remote"
           tag=$(uv run --locked python scripts/release.py next-tag)
           git tag "$tag" "$SHA"
-          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "refs/tags/$tag"
+          git push "$remote" "refs/tags/$tag"
           gh release create "$tag" --repo "$GITHUB_REPOSITORY" --verify-tag \
             --title "$tag" --notes "Provider release $tag at $SHA." dist/*
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
