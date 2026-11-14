@@ -13,3 +13,4 @@
 - First version: the template adapter over Example Cloud.
 
 <!-- r6 live-test probe -->
+<!-- second -->
