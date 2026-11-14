@@ -157,3 +157,53 @@ def test_an_endpoint_folder_with_another_provider_id_fails_the_build(tmp_path: P
     )
     assert done.returncode == 1
     assert "pingo: endpoint.yaml provider_id is 'other'" in done.stderr
+
+
+HYPHENATED = "zzsynthetic-adapter"
+
+
+def hyphenated_adapter(root: Path) -> Path:
+    """The template adapter under a hyphenated id: folder, manifest, entry point and package."""
+    folder = root / "providers" / HYPHENATED
+    shutil.copytree(ROOT / "providers" / "example", folder, ignore=IGNORE)
+    module = "sps_provider_zzsynthetic_adapter"
+    (folder / "src" / "sps_provider_example").rename(folder / "src" / module)
+    for path in (folder / "pyproject.toml", folder / "uv.lock", folder / "src" / module / "sps-provider.yaml"):
+        text = path.read_text()
+        text = text.replace("provider_id: example", f"provider_id: {HYPHENATED}")
+        text = text.replace("sps-provider-example", f"sps-provider-{HYPHENATED}")
+        text = text.replace('example = "sps_provider_example:', f'{HYPHENATED} = "{module}:')
+        text = text.replace("src/sps_provider_example", f"src/{module}")
+        path.write_text(text)
+    return folder
+
+
+def test_a_hyphenated_adapter_builds_and_is_declared_by_its_id(tmp_path: Path) -> None:
+    root = git_repo(tmp_path / "repo", [])
+    hyphenated_adapter(root)
+    out = tmp_path / "out"
+    release("build", "--out", str(out), root=root)
+    declarations = json.loads((out / "declarations.json").read_text())
+    assert list(declarations["providers"]) == [HYPHENATED]
+    assert declarations["providers"][HYPHENATED]["provider_id"] == HYPHENATED
+    lock = (out / "providers.lock").read_text().splitlines()
+    assert lock[0].split(" ")[0] == HYPHENATED
+    assert (out / f"requirements-{HYPHENATED}.txt").is_file()
+
+
+@pytest.mark.parametrize("folder", ["Upper", "under_score", "a", "x" * 33])
+def test_a_folder_outside_the_sps_rule_fails_the_build(tmp_path: Path, folder: str) -> None:
+    root = git_repo(tmp_path / "repo", [])
+    endpoint_folder(root)
+    (root / "providers" / "pingo").rename(root / "providers" / folder)
+    (root / "providers" / folder / "endpoint.yaml").write_text(
+        ENDPOINT_YAML.replace("provider_id: pingo", f"provider_id: {folder}")
+    )
+    done = subprocess.run(
+        [sys.executable, str(SCRIPT), "--root", str(root), "build", "--out", str(tmp_path / "out")],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert done.returncode == 1
+    assert f"{folder}: the folder name does not match" in done.stderr

@@ -151,7 +151,10 @@ def check_manifest(provider: str, manifest: dict, shared: list[str]) -> list[str
 
 ENDPOINT = "endpoint.yaml"
 ENDPOINT_FIELDS = ("provider_id", "name", "spec_version", "base_url")
-PROVIDER_ID = re.compile(r"[a-z][a-z0-9_]{0,63}")
+#: The SPS 1.0 provider id (`sps-provider.schema.json`), the one rule for every folder and manifest.
+#: Where a Python identifier is needed, replace `-` with `_` (`sps_provider_<id>`, the secret name
+#: `BOXROUTER_PROVIDER_<ID upper>_INTERNAL_<FIELD>`).
+PROVIDER_ID = re.compile(r"[a-z0-9-]{2,32}")
 PACKAGE_FILES = ("pyproject.toml", "uv.lock", "src")
 
 
@@ -207,8 +210,6 @@ def check_endpoint(root: Path, provider: str, shared: list[str]) -> list[str]:
     ]
     if "provider_id" in endpoint and endpoint["provider_id"] != provider:
         failures.append(f"{provider}: {ENDPOINT} provider_id is {endpoint['provider_id']!r}")
-    if not PROVIDER_ID.fullmatch(provider):
-        failures.append(f"{provider}: the folder name is not a lowercase identifier")
     if "name" in endpoint and not (isinstance(endpoint["name"], str) and endpoint["name"].strip()):
         failures.append(f"{provider}: {ENDPOINT} name is empty")
     if "spec_version" in endpoint and endpoint["spec_version"] != "1.0":
@@ -239,6 +240,8 @@ def check_folder(
     root: Path, base: str, provider: str, policy: dict, shared: list[str]
 ) -> list[str]:
     folder = root / "providers" / provider
+    if not PROVIDER_ID.fullmatch(provider):
+        return [f"{provider}: the folder name does not match the SPS provider id ^[a-z0-9-]{{2,32}}$"]
     if (folder / ENDPOINT).is_file():
         return check_endpoint(root, provider, shared)
     missing = [n for n in ("pyproject.toml", "uv.lock") if not (folder / n).is_file()]
@@ -252,6 +255,10 @@ def check_folder(
     if manifests:
         manifest = yaml.safe_load(manifests[0].read_text()) or {}
         failures += check_manifest(provider, manifest, shared)
+        if manifest.get("provider_id") != provider:
+            failures.append(
+                f"{provider}: sps-provider.yaml provider_id is {manifest.get('provider_id')!r}"
+            )
     else:
         failures.append(f"{provider}: sps-provider.yaml is missing")
     return failures + check_owners(root, provider)
