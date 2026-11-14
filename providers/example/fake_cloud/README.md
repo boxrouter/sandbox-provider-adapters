@@ -28,7 +28,7 @@ existing provider API and the standard.
 ## Run
 
 ```console
-$ python template/fake_cloud/server.py --port 18080 --state-dir /tmp/example-cloud
+$ python fake_cloud/server.py --port 18080 --state-dir /tmp/example-cloud
 ```
 
 | Flag | Default | Meaning |
@@ -89,7 +89,7 @@ matching HTTP status.
 ## Tests
 
 ```console
-$ uv run --locked pytest template/fake_cloud/tests -q
+$ uv run --group tools pytest fake_cloud/tests -q
 ```
 
 The tests start the server on a loopback port and create real containers.

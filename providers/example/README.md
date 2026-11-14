@@ -18,17 +18,17 @@ call with your own API's.
 Example Cloud needs a local Docker daemon.
 
 ```console
-$ uv run --locked python template/fake_cloud/server.py --port 18080 --state-dir /tmp/example-cloud &
+$ uv run --group tools python fake_cloud/server.py --port 18080 --state-dir /tmp/example-cloud &
 ```
 
 Every request needs a non-empty `X-Api-Key`; any value works, for example `dev`.
 
 ## Smoke check
 
-From `packages/sandbox-provider-spec`:
+From this folder:
 
 ```console
-$ uv run --locked --package sps-provider-example python template/scripts/smoke.py \
+$ uv run --group tools python scripts/smoke.py \
     --endpoint http://127.0.0.1:18080 --api-key dev
 smoke ok
 ```
@@ -40,26 +40,24 @@ and reads its cost.
 
 ```console
 $ export EXAMPLE_API_KEY=dev EXAMPLE_ENDPOINT=http://127.0.0.1:18080
-$ uv run sandbox-provider-spec test example \
+$ uv run --group tools sandbox-provider-spec test example \
     --credential api_key=EXAMPLE_API_KEY --credential endpoint=EXAMPLE_ENDPOINT
 ```
 
 Or serve the adapter over the standard HTTP API and test it as a native provider:
 
 ```console
-$ uv run sandbox-provider-spec serve example --port 18431 &
-$ export SPS_TOKEN=$(uv run --locked python -c \
+$ uv run --group tools sandbox-provider-spec serve example --port 18431 &
+$ export SPS_TOKEN=$(uv run --group tools python -c \
     "from sandbox_provider_spec.v1.tokens import encode; print(encode({'api_key': 'dev', 'endpoint': 'http://127.0.0.1:18080'}))")
-$ uv run sandbox-provider-spec test http://127.0.0.1:18431 --credential token=SPS_TOKEN
+$ uv run --group tools sandbox-provider-spec test http://127.0.0.1:18431 --credential token=SPS_TOKEN
 ```
 
 ## Offline tests
 
 ```console
-$ uv run --locked --package sps-provider-example pytest template/tests -q
+$ uv run --locked pytest tests -q
 ```
 
-(Run it from `packages/sandbox-provider-spec`. uv does not treat `template/` as a workspace member
-when it is the current directory, so name the package instead of changing into it.)
 
 They replay recorded Example Cloud responses and need no Docker daemon.

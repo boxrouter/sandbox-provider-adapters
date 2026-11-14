@@ -5,7 +5,7 @@
 Creates a sandbox, runs `echo hi`, writes and reads a file, destroys the
 sandbox and reads its cost, then prints `smoke ok`.
 
-    python template/scripts/smoke.py --endpoint http://127.0.0.1:18080 --api-key dev
+    python scripts/smoke.py --endpoint http://127.0.0.1:18080 --api-key dev
 """
 
 from __future__ import annotations
