@@ -165,7 +165,8 @@ jobs:
           # The fake backend runs its sandboxes as local containers. The runner VM's own metadata
           # services must stay unreachable from them, as they are at a real provider.
           sudo iptables -I DOCKER-USER -d 169.254.169.254 -j REJECT
-          sudo iptables -I DOCKER-USER -d 168.63.129.16 -j REJECT
+          # 168.63.129.16 is also Azure's DNS resolver, so only its TCP services are rejected.
+          sudo iptables -I DOCKER-USER -p tcp -d 168.63.129.16 -m multiport --dports 80,32526 -j REJECT
           uv run --no-sync --project "pr/providers/$PROVIDER" python "$server" \
             --port 18080 --state-dir "$RUNNER_TEMP/fake-cloud" > "$RUNNER_TEMP/fake-cloud.log" 2>&1 &
           echo $! >> "$RUNNER_TEMP/pids.txt"
