@@ -1,0 +1,6 @@
+provider_id: acme
+name: Acme Cloud
+spec_version: "1.0"
+credential_fields:
+  - {name: api_key, secret: true, description: "API key from the Acme console"}
+api_domains: [api.acme.test]

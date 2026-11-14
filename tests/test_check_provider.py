@@ -4,7 +4,7 @@ from conftest import Repo
 
 PYPROJECT = "providers/acme/pyproject.toml"
 LOCK = "providers/acme/uv.lock"
-DECLARATION = "providers/acme/declaration.yaml"
+MANIFEST = "providers/acme/src/sps_provider_acme/sps-provider.yaml"
 OWNERS = "providers/acme/OWNERS"
 DEPENDENCIES = '"httpx>=0.27", "sandbox-provider-spec"]'
 OK = "provider checks ok: 1 folder(s)\n"
@@ -96,28 +96,33 @@ def test_unchanged_version_fails(repo: Repo) -> None:
     assert (outcome.code, outcome.stderr) == (1, "acme: version not raised (0.1.0 -> 0.1.0)\n")
 
 
-def test_declaration_with_hosts_under_suffixes_passes(repo: Repo) -> None:
+def test_manifest_with_hosts_and_suffixes_passes(repo: Repo) -> None:
     def change(r: Repo) -> None:
         bump_version(r)
-        r.write(DECLARATION, "hosts: [api.acme.test, files.acme.test]\nsuffixes: [acme.test]\n")
+        r.edit(
+            MANIFEST,
+            "api_domains: [api.acme.test]",
+            "api_domains: [api.acme.test, .acme.test, files.acme.s3.amazonaws.com]",
+        )
 
     outcome = repo.check(change)
     assert (outcome.code, outcome.stdout) == (0, OK)
 
 
-def test_declaration_with_stray_host_and_shared_suffix_fails(repo: Repo) -> None:
+def test_manifest_with_missing_field_and_shared_suffix_fails(repo: Repo) -> None:
     def change(r: Repo) -> None:
         bump_version(r)
         r.write(
-            DECLARATION,
-            "hosts: [api.acme.test, api.other.test]\nsuffixes: [acme.test, s3.amazonaws.com]\n",
+            MANIFEST,
+            "provider_id: acme\nname: Acme\nspec_version: '1.0'\n"
+            "api_domains: [api.acme.test, .s3.amazonaws.com]\n",
         )
 
     outcome = repo.check(change)
     assert (outcome.code, outcome.stderr) == (
         1,
-        "acme: host api.other.test is not under a declared suffix\n"
-        "acme: shared-hosting suffix refused: s3.amazonaws.com\n",
+        "acme: sps-provider.yaml is missing credential_fields\n"
+        "acme: shared-hosting suffix refused: .s3.amazonaws.com\n",
     )
 
 

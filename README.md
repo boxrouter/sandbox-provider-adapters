@@ -25,8 +25,7 @@ sandbox-providers/
 │   └── <provider>/
 │       ├── pyproject.toml
 │       ├── uv.lock
-│       ├── declaration.yaml
-│       ├── src/sps_provider_<provider>/
+│       ├── src/sps_provider_<provider>/   # includes sps-provider.yaml
 │       ├── tests/
 │       ├── brand/
 │       ├── OWNERS

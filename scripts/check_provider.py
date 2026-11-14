@@ -122,27 +122,27 @@ def check_version(root: Path, base: str, provider: str, new: str) -> list[str]:
     return []
 
 
-def under(name: str, suffix: str) -> bool:
-    return name == suffix or name.endswith("." + suffix)
+MANIFEST_FIELDS = ("provider_id", "name", "spec_version", "credential_fields", "api_domains")
 
 
-def check_declaration(provider: str, declaration: dict, shared: list[str]) -> list[str]:
-    hosts = declaration.get("hosts") or []
-    suffixes = declaration.get("suffixes") or []
-    failures = []
+def check_manifest(provider: str, manifest: dict, shared: list[str]) -> list[str]:
+    """Check `sps-provider.yaml`: an `api_domains` entry is an exact host or a `.suffix`."""
+    failures = [
+        f"{provider}: sps-provider.yaml is missing {field}"
+        for field in MANIFEST_FIELDS
+        if field not in manifest
+    ]
+    domains = manifest.get("api_domains") or []
+    suffixes = [d for d in domains if d.startswith(".")]
+    hosts = [d for d in domains if not d.startswith(".")]
     if len(hosts) > MAX_DECLARED:
         failures.append(f"{provider}: more than {MAX_DECLARED} hosts ({len(hosts)})")
     if len(suffixes) > MAX_DECLARED:
         failures.append(f"{provider}: more than {MAX_DECLARED} suffixes ({len(suffixes)})")
     failures += [
-        f"{provider}: host {host} is not under a declared suffix"
-        for host in hosts
-        if not any(under(host, suffix) for suffix in suffixes)
-    ]
-    failures += [
         f"{provider}: shared-hosting suffix refused: {suffix}"
         for suffix in suffixes
-        if any(under(suffix, banned) for banned in shared)
+        if any(suffix[1:] == banned or suffix.endswith("." + banned) for banned in shared)
     ]
     return failures
 
@@ -175,13 +175,12 @@ def check_folder(
     failures = check_dependencies(provider, pyproject, policy)
     failures += check_wheels(provider, tomllib.loads((folder / "uv.lock").read_text()))
     failures += check_version(root, base, provider, pyproject.get("project", {}).get("version", ""))
-    declaration_path = folder / "declaration.yaml"
-    if declaration_path.is_file():
-        failures += check_declaration(
-            provider, yaml.safe_load(declaration_path.read_text()) or {}, shared
-        )
+    manifests = sorted(folder.glob("src/*/sps-provider.yaml"))
+    if manifests:
+        manifest = yaml.safe_load(manifests[0].read_text()) or {}
+        failures += check_manifest(provider, manifest, shared)
     else:
-        failures.append(f"{provider}: declaration.yaml is missing")
+        failures.append(f"{provider}: sps-provider.yaml is missing")
     return failures + check_owners(root, provider)
 
 
