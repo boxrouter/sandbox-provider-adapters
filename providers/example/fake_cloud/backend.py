@@ -10,6 +10,7 @@ under the server's state directory and outlive their container.
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import queue
@@ -82,15 +83,21 @@ class ApiError(Exception):
         self.message = message
 
 
+def _removing(exc: APIError) -> bool:
+    """Docker answers 500/409 instead of 404 for a container whose removal has begun."""
+    text = str(exc.explanation or "")
+    return "RWLayer" in text or "removal of container" in text
+
+
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _parse_time(text: str) -> datetime:
-    return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    return datetime.fromisoformat(text)
 
 
-def _plus(text: str, seconds: int | float) -> str:
+def _plus(text: str, seconds: float) -> str:
     return (
         (_parse_time(text) + timedelta(seconds=seconds))
         .isoformat(timespec="milliseconds")
@@ -478,6 +485,10 @@ class ExampleCloud:
             _, stat = native.get_archive(path)
         except NotFound:
             raise ApiError(404, "not_found", f"no such file: {path}") from None
+        except APIError as exc:
+            if _removing(exc):
+                raise ApiError(404, "not_found", f"unknown machine {machine_id}") from None
+            raise
         if statmod.S_ISDIR(int(stat.get("mode", 0))):
             raise ApiError(400, "invalid_request", f"{path} is a directory")
         return int(stat.get("size", 0))
@@ -488,6 +499,10 @@ class ExampleCloud:
             chunks, stat = native.get_archive(path)
         except NotFound:
             raise ApiError(404, "not_found", f"no such file: {path}") from None
+        except APIError as exc:
+            if _removing(exc):
+                raise ApiError(404, "not_found", f"unknown machine {machine_id}") from None
+            raise
         if statmod.S_ISDIR(int(stat.get("mode", 0))):
             close = getattr(chunks, "close", None)
             if close is not None:
@@ -506,7 +521,7 @@ class ExampleCloud:
             raise ApiError(400, "invalid_request", f"bad file path: {path}")
 
         def tar_stream() -> Iterator[bytes]:
-            out: queue.Queue[bytes | BaseException | None] = queue.Queue(maxsize=32)
+            out: queue.Queue[bytes | Exception | None] = queue.Queue(maxsize=32)
 
             def produce() -> None:
                 try:
@@ -516,7 +531,7 @@ class ExampleCloud:
                         info.mode = 0o644
                         info.mtime = int(time.time())
                         archive.addfile(info, _IterRead(body))
-                except BaseException as exc:  # propagates to the upload below
+                except Exception as exc:  # noqa: BLE001 - forward producer failures to the caller
                     out.put(exc)
                 finally:
                     out.put(None)
@@ -526,7 +541,7 @@ class ExampleCloud:
                 chunk = out.get()
                 if chunk is None:
                     return
-                if isinstance(chunk, BaseException):
+                if isinstance(chunk, Exception):
                     raise chunk
                 yield chunk
 
@@ -696,7 +711,5 @@ class ExampleCloud:
     def close(self) -> None:
         self._closed.set()
         for client in (self.client, self.streams):
-            try:
+            with contextlib.suppress(DockerException, RequestException, OSError):
                 client.close()
-            except Exception:
-                pass

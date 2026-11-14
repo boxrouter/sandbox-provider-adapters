@@ -89,7 +89,7 @@ matching HTTP status.
 ## Tests
 
 ```console
-$ uv run --group tools pytest fake_cloud/tests -q
+$ uv run --locked pytest fake_cloud/tests -q
 ```
 
 The tests start the server on a loopback port and create real containers.
