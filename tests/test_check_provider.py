@@ -241,3 +241,56 @@ def test_endpoint_folder_with_package_files_fails(repo: Repo) -> None:
         "pingo: an endpoint folder must not hold pyproject.toml (it has no package)\n"
         "pingo: an endpoint folder must not hold src (it has no package)\n",
     )
+
+
+def add_hyphenated_adapter(repo: Repo) -> None:
+    """The acme fixture copied to a hyphenated id: folder, manifest id and module name."""
+    for source in sorted((repo.root / "providers" / "acme").rglob("*")):
+        if source.is_file():
+            relative = source.relative_to(repo.root / "providers" / "acme")
+            target = str(relative).replace("sps_provider_acme", "sps_provider_zzsynthetic_adapter")
+            text = source.read_text()
+            if source.name != "OWNERS":
+                text = text.replace("acme", "zzsynthetic-adapter")
+            repo.write(f"providers/zzsynthetic-adapter/{target}", text)
+    repo.write(".github/CODEOWNERS", "/providers/acme/ @acme-dev\n/providers/zzsynthetic-adapter/ @acme-dev\n")
+
+
+def test_hyphenated_adapter_folder_passes(repo: Repo) -> None:
+    outcome = repo.check(add_hyphenated_adapter)
+    assert (outcome.code, outcome.stdout, outcome.stderr) == (0, OK, "")
+
+
+def test_hyphenated_endpoint_folder_passes(repo: Repo) -> None:
+    def change(r: Repo) -> None:
+        folder = "providers/pingo-box"
+        r.write(f"{folder}/endpoint.yaml", ENDPOINT_TEXT.replace("provider_id: pingo", "provider_id: pingo-box"))
+        r.write(f"{folder}/OWNERS", "@pingo-dev\n")
+        r.write(".github/CODEOWNERS", "/providers/acme/ @acme-dev\n/providers/pingo-box/ @pingo-dev\n")
+
+    outcome = repo.check(change)
+    assert (outcome.code, outcome.stdout, outcome.stderr) == (0, OK, "")
+
+
+def test_adapter_manifest_id_must_equal_the_folder(repo: Repo) -> None:
+    def change(r: Repo) -> None:
+        bump_version(r)
+        r.edit(MANIFEST, "provider_id: acme", "provider_id: acme-other")
+
+    outcome = repo.check(change)
+    assert (outcome.code, outcome.stderr) == (
+        1,
+        "acme: sps-provider.yaml provider_id is 'acme-other'\n",
+    )
+
+
+def test_folder_names_outside_the_sps_rule_fail(repo: Repo) -> None:
+    for name in ("Upper", "under_score", "a", "x" * 33):
+        outcome = repo.fresh().check(
+            lambda r, name=name: (
+                r.write(f"providers/{name}/endpoint.yaml", ENDPOINT_TEXT),
+                r.write(f"providers/{name}/OWNERS", "@pingo-dev\n"),
+            )
+        )
+        assert outcome.code == 1, name
+        assert f"{name}: the folder name does not match the SPS provider id" in outcome.stderr

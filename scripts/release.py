@@ -32,6 +32,7 @@ from pathlib import Path
 
 import tomllib
 import yaml
+from check_provider import PROVIDER_ID
 
 SPS_PACKAGE = "sandbox-provider-spec"
 DECLARATIONS = "declarations.json"
@@ -151,6 +152,8 @@ def build(root: Path, out: Path) -> None:
     declarations: dict[str, dict] = {}
     lock_lines: list[str] = []
     for provider in providers:
+        if not PROVIDER_ID.fullmatch(provider):
+            sys.exit(f"{provider}: the folder name does not match ^[a-z0-9-]{{2,32}}$")
         if (root / "providers" / provider / ENDPOINT).is_file():
             declarations[provider] = read_endpoint(root, provider)
             continue
