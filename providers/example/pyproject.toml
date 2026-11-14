@@ -7,7 +7,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sps-provider-example"
-version = "0.1.0"
+version = "0.1.1"
 description = "The template provider adapter: a 1.0 Provider over Example Cloud"
 readme = "README.md"
 license = "Apache-2.0"
@@ -31,7 +31,7 @@ tools = [
 ]
 
 [tool.uv.sources]
-sandbox-provider-spec = { path = "vendor/sandbox_provider_spec-0.3.204-py3-none-any.whl" }
+sandbox-provider-spec = { path = "vendor/sandbox_provider_spec-0.3.206-py3-none-any.whl" }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/sps_provider_example"]
