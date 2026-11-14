@@ -28,6 +28,18 @@
     A provider using shared hosting declares exact hostnames. Call out changes to domains or
     account fields in the review comment.
 
+## Endpoint folders
+
+An endpoint folder (`endpoint.yaml`, no package) has no code to read, so review the file itself:
+
+1. `provider_id` equals the folder name; `spec_version` is `"1.0"`; `name` is the provider's own.
+2. `base_url` is the provider's own HTTPS server, a public DNS name off the shared-hosting
+   suffixes. `checks.yml` refuses an IP address, `localhost`, user info, a query, a fragment, a
+   trailing slash and a shared-hosting host; confirm the host belongs to the provider.
+3. The folder holds no `pyproject.toml`, `uv.lock` or `src/`, and nothing else executable.
+4. A later change of `base_url` points Cloud's traffic at another host: treat it as a domain
+   change and call it out in the review comment.
+
 ## Release tags (P5 hardening item)
 
 `release.yml` tags and publishes with the workflow's own `GITHUB_TOKEN`. No ruleset restricts

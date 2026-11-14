@@ -51,6 +51,10 @@ class Repo:
         assert old in text
         self.write(relative, text.replace(old, new))
 
+    def fresh(self) -> "Repo":
+        """Another repo built from the same base, for a case that cannot share this one's branch."""
+        return make_repo(self.root.parent / f"repo-{len(list(self.root.parent.iterdir()))}")
+
     def check(self, change: Callable[["Repo"], None]) -> Outcome:
         """Commit `change` on a branch off main and run the checker against main."""
         self.git("switch", "-q", "-c", "pr")
@@ -66,12 +70,15 @@ class Repo:
         return Outcome(done.returncode, done.stdout, done.stderr)
 
 
-@pytest.fixture
-def repo(tmp_path: Path) -> Repo:
-    root = tmp_path / "repo"
+def make_repo(root: Path) -> Repo:
     shutil.copytree(BASE_FIXTURE, root)
     result = Repo(root)
     result.git("init", "-q", "-b", "main")
     result.git("add", "-A")
     result.git("commit", "-q", "-m", "base")
     return result
+
+
+@pytest.fixture
+def repo(tmp_path: Path) -> Repo:
+    return make_repo(tmp_path / "repo")
