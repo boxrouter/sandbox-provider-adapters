@@ -1,0 +1,27 @@
+version = 1
+requires-python = ">=3.10"
+
+[[package]]
+name = "httpx"
+version = "0.28.1"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/httpx-0.28.1-py3-none-any.whl", hash = "sha256:00" },
+]
+
+[[package]]
+name = "sandbox-provider-spec"
+version = "1.0.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/sandbox_provider_spec-1.0.0-py3-none-any.whl", hash = "sha256:01" },
+]
+
+[[package]]
+name = "sps-provider-acme"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "httpx" },
+    { name = "sandbox-provider-spec" },
+]
