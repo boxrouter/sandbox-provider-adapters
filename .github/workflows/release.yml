@@ -58,5 +58,5 @@ jobs:
           GH_TOKEN: ${{ steps.dispatch_app.outputs.token }}
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          gh workflow run repin.yml --repo boxrouter/cloud \
+          gh workflow run repin.yml --repo boxrouter/cloud --ref main \
             -f repo=boxrouter/sandbox-providers -f tag="$TAG"
