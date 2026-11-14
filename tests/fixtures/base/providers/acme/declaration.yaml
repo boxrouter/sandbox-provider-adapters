@@ -1,2 +1,0 @@
-hosts: [api.acme.test]
-suffixes: [acme.test]

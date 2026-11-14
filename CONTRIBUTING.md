@@ -4,7 +4,7 @@
 
 1. Copy the adapter template from `cloud/packages/sandbox-provider-spec/template/` into
    `providers/<provider>/`.
-2. Complete the provider project, static declaration, offline tests, `OWNERS`, brand files and
+2. Complete the provider project, `sps-provider.yaml` manifest, offline tests, `OWNERS`, brand files and
    changelog for that provider.
 3. Run the SPS tester against the adapter or its served URL, using the provider's test-account
    environment variable. The interface assumed by this design is
