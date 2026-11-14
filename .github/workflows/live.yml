@@ -1,0 +1,254 @@
+name: live
+
+# The live suite for one provider folder, run only after a maintainer adds the `live-test` label.
+# pull_request_target runs this file from main, so a pull request cannot change which credential
+# the job gets. The job reads one provider's test-account secrets through GitHub OIDC (role
+# sandbox-providers-live-<p>, trusted only for the environment provider-<p>) and nothing else.
+# The proxy script is fetched from main, never from the pull request. A new push removes the label.
+on:
+  pull_request_target:
+    types: [labeled, synchronize]
+
+permissions: {}
+
+concurrency:
+  # A push cancels a running suite. Another label (the agent's) gets its own group and cancels nothing.
+  group: live-${{ github.event.pull_request.number }}-${{ github.event.action == 'labeled' && github.event.label.name != 'live-test' && github.run_id || 'main' }}
+  cancel-in-progress: true
+
+env:
+  AWS_REGION: us-east-2
+  # Account that holds the test-account secrets and the sandbox-providers-live-<p> roles.
+  AWS_ACCOUNT_ID: "276996008033"
+  PR_NUMBER: ${{ github.event.pull_request.number }}
+  HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+
+jobs:
+  unlabel:
+    if: github.event.action == 'synchronize'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Remove the live-test label
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api -X DELETE "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels/live-test" \
+            >/dev/null 2>&1 || echo "no live-test label to remove"
+
+  plan:
+    if: github.event.action == 'labeled' && github.event.label.name == 'live-test'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      provider: ${{ steps.folders.outputs.provider }}
+    steps:
+      - name: Find the one provider folder this pull request changes
+        id: folders
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" \
+            --jq '.[] | .filename, (.previous_filename // empty)' | sort -u > paths.txt
+          folders=$(sed -n 's|^providers/\([^/_][^/]*\)/.*|\1|p' paths.txt | sort -u)
+          outside=$(grep -v '^providers/[^/_][^/]*/' paths.txt || true)
+          count=$(printf '%s\n' "$folders" | grep -c . || true)
+          if [ "$count" -gt 1 ]; then
+            echo "live-test runs on one provider folder; this PR changes: $(printf '%s\n' "$folders" | paste -sd, - | sed 's/,/, /g')"
+            exit 1
+          fi
+          if [ "$count" -eq 0 ]; then
+            echo "live-test runs on one provider folder; this PR changes none"
+            exit 1
+          fi
+          if [ -n "$outside" ]; then
+            echo "live-test runs on one provider folder; this PR also changes files outside it: $(printf '%s\n' "$outside" | head -5 | paste -sd, - | sed 's/,/, /g')"
+            exit 1
+          fi
+          if ! printf '%s\n' "$folders" | grep -Eq '^[a-z][a-z0-9-]{0,40}$'; then
+            echo "live-test: the provider folder name must be lowercase letters, digits and hyphens"
+            exit 1
+          fi
+          echo "provider=$folders" >> "$GITHUB_OUTPUT"
+
+  live:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: provider-${{ needs.plan.outputs.provider }}
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    env:
+      PROVIDER: ${{ needs.plan.outputs.provider }}
+      PROXY_PORT: "3128"
+      SERVE_PORT: "18431"
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: pr
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+      - name: Fetch the proxy script from main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          gh api -H 'Accept: application/vnd.github.raw' \
+            "repos/$GITHUB_REPOSITORY/contents/scripts/live_proxy.py?ref=$GITHUB_SHA" \
+            > "$RUNNER_TEMP/live_proxy.py"
+      - name: Read the declared credential fields
+        run: |
+          set -eu
+          manifest=$(ls pr/providers/"$PROVIDER"/src/*/sps-provider.yaml pr/providers/"$PROVIDER"/sps-provider.yaml 2>/dev/null | head -1)
+          [ -n "$manifest" ] || { echo "providers/$PROVIDER has no sps-provider.yaml"; exit 1; }
+          echo "MANIFEST=$manifest" >> "$GITHUB_ENV"
+          uv run --no-project --with pyyaml==6.0.3 python - "$manifest" > "$RUNNER_TEMP/fields.txt" <<'PY'
+          import re, sys, yaml
+          manifest = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
+          for field in manifest.get("credential_fields") or []:
+              name = field["name"]
+              if not re.fullmatch(r"[a-z][a-z0-9_]{0,40}", name):
+                  sys.exit(f"credential field name {name!r} is not lowercase letters, digits and underscores")
+              print(name, "optional" if field.get("required") is False else "required")
+          PY
+          cat "$RUNNER_TEMP/fields.txt"
+      - name: Assume the provider's test-account role
+        id: aws
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/sandbox-providers-live-${{ env.PROVIDER }}
+          aws-region: ${{ env.AWS_REGION }}
+          output-credentials: true
+          output-env-credentials: false
+      - name: Read the test-account secrets
+        env:
+          AWS_ACCESS_KEY_ID: ${{ steps.aws.outputs.aws-access-key-id }}
+          AWS_SECRET_ACCESS_KEY: ${{ steps.aws.outputs.aws-secret-access-key }}
+          AWS_SESSION_TOKEN: ${{ steps.aws.outputs.aws-session-token }}
+        run: |
+          set -eu
+          id=$(printf '%s' "$PROVIDER" | tr 'a-z-' 'A-Z_')
+          : > "$RUNNER_TEMP/field-env.txt"
+          while read -r field need; do
+            upper=$(printf '%s' "$field" | tr 'a-z' 'A-Z')
+            name="BOXROUTER_PROVIDER_${id}_INTERNAL_${upper}"
+            if ! value=$(aws secretsmanager get-secret-value --secret-id "$name" \
+                --query SecretString --output text 2>"$RUNNER_TEMP/aws-error.txt"); then
+              if [ "$need" = optional ] && grep -q ResourceNotFoundException "$RUNNER_TEMP/aws-error.txt"; then
+                echo "optional field $field has no secret; the adapter uses its default"
+                continue
+              fi
+              echo "cannot read the secret for field $field ($name)"
+              exit 1
+            fi
+            while IFS= read -r line; do echo "::add-mask::$line"; done <<< "$value"
+            var="${id}_${upper}"
+            delimiter="EOF_$(openssl rand -hex 8)"
+            { echo "$var<<$delimiter"; printf '%s\n' "$value"; echo "$delimiter"; } >> "$GITHUB_ENV"
+            echo "$field $var" >> "$RUNNER_TEMP/field-env.txt"
+          done < "$RUNNER_TEMP/fields.txt"
+      - name: Install the provider and the tester
+        run: uv sync --locked --project "pr/providers/$PROVIDER" --group tools
+      - name: Start the provider's local fake backend, if the folder ships one
+        run: |
+          set -eu
+          server="pr/providers/$PROVIDER/fake_cloud/server.py"
+          [ -f "$server" ] || { echo "no fake backend in this folder"; exit 0; }
+          uv run --no-sync --project "pr/providers/$PROVIDER" python "$server" \
+            --port 18080 --state-dir "$RUNNER_TEMP/fake-cloud" > "$RUNNER_TEMP/fake-cloud.log" 2>&1 &
+          echo $! >> "$RUNNER_TEMP/pids.txt"
+          curl -s -o /dev/null --retry 60 --retry-connrefused --retry-delay 1 http://127.0.0.1:18080/
+      - name: Start the host allowlist proxy
+        run: |
+          set -eu
+          uv run --no-project --with pyyaml==6.0.3 python "$RUNNER_TEMP/live_proxy.py" \
+            --manifest "$MANIFEST" --port "$PROXY_PORT" > "$RUNNER_TEMP/proxy.log" 2>&1 &
+          echo $! >> "$RUNNER_TEMP/pids.txt"
+          curl -s -o /dev/null --retry 60 --retry-connrefused --retry-delay 1 "http://127.0.0.1:$PROXY_PORT/" || true
+      - name: Serve the adapter
+        run: |
+          set -eu
+          unset_args="-u ACTIONS_ID_TOKEN_REQUEST_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_URL"
+          while read -r field var; do unset_args="$unset_args -u $var"; done < "$RUNNER_TEMP/field-env.txt"
+          # shellcheck disable=SC2086
+          env $unset_args \
+            HTTPS_PROXY="http://127.0.0.1:$PROXY_PORT" https_proxy="http://127.0.0.1:$PROXY_PORT" \
+            uv run --no-sync --project "pr/providers/$PROVIDER" \
+            python -m sandbox_provider_spec serve "$PROVIDER" --port "$SERVE_PORT" \
+            > "$RUNNER_TEMP/serve.log" 2>&1 &
+          echo $! >> "$RUNNER_TEMP/pids.txt"
+          curl -s -o /dev/null --retry 60 --retry-connrefused --retry-delay 1 "http://127.0.0.1:$SERVE_PORT/"
+      - name: Run the tester against the served adapter
+        id: tester
+        run: |
+          set -eu
+          export FIELD_ENV_FILE="$RUNNER_TEMP/field-env.txt"
+          token=$(env -u ACTIONS_ID_TOKEN_REQUEST_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_URL \
+            uv run --no-sync --project "pr/providers/$PROVIDER" python - <<'PY'
+          import os
+          from sandbox_provider_spec.v1.tokens import encode
+          fields = {}
+          for line in open(os.environ["FIELD_ENV_FILE"], encoding="utf-8"):
+              field, var = line.split()
+              fields[field] = os.environ[var]
+          print(next(iter(fields.values())) if len(fields) == 1 else encode(fields))
+          PY
+          )
+          echo "::add-mask::$token"
+          set +e
+          SPS_TOKEN="$token" env -u ACTIONS_ID_TOKEN_REQUEST_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_URL \
+            uv run --no-sync --project "pr/providers/$PROVIDER" \
+            sandbox-provider-spec test "http://127.0.0.1:$SERVE_PORT" --credential token=SPS_TOKEN \
+            --output "$RUNNER_TEMP/sps-report.json" 2>&1 | tee "$RUNNER_TEMP/tester.log"
+          status=${PIPESTATUS[0]}
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          exit "$status"
+      - name: Stop the processes this job started
+        if: always()
+        run: |
+          # The tester deletes every sandbox it labelled sps.test.run=<run id> before it returns.
+          # This stops what the job started, so nothing outlives it.
+          [ -f "$RUNNER_TEMP/pids.txt" ] || exit 0
+          while read -r pid; do kill "$pid" 2>/dev/null || true; done < "$RUNNER_TEMP/pids.txt"
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: live-report-${{ env.PROVIDER }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/sps-report.json
+            ${{ runner.temp }}/tester.log
+            ${{ runner.temp }}/proxy.log
+          if-no-files-found: ignore
+      - name: Comment the result on the pull request
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OUTCOME: ${{ steps.tester.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -eu
+          case "$OUTCOME" in
+            success) verdict="passed" ;;
+            skipped) verdict="did not run (see the run log)" ;;
+            *) verdict="failed" ;;
+          esac
+          counts=""
+          if [ -f "$RUNNER_TEMP/sps-report.json" ]; then
+            counts=$(jq -r '[.tests[]?.result | select(type == "string" and test("^[a-z_]{1,24}$"))]
+              | group_by(.) | map("\(.[0]): \(length)") | join(", ")' "$RUNNER_TEMP/sps-report.json" || true)
+          fi
+          {
+            echo "Live suite for \`$PROVIDER\` at \`${HEAD_SHA:0:12}\` $verdict."
+            [ -z "$counts" ] || echo "Results: $counts."
+            echo "Run and report: $RUN_URL"
+          } > "$RUNNER_TEMP/comment.md"
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/comment.md"
