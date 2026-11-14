@@ -18,7 +18,7 @@ all review text and use the approved secure credential flow for test runs.
 
 A folder name, `provider_id` and entry-point name match `^[a-z0-9-]{2,32}$`, the SPS 1.0 rule
 (`docker-engine` is valid). Where Python needs an identifier, replace `-` with `_`: the package is
-`sps_provider_docker_engine`, and the secret name is `BOXROUTER_PROVIDER_DOCKER_ENGINE_INTERNAL_<FIELD>`.
+`sps_provider_docker_engine`, and the test-account secret name is `BOXROUTER_CONTRIBUTED_DOCKER_ENGINE_<FIELD>`.
 
 ## Add a native endpoint
 
