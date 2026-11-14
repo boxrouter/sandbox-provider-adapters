@@ -153,7 +153,7 @@ ENDPOINT = "endpoint.yaml"
 ENDPOINT_FIELDS = ("provider_id", "name", "spec_version", "base_url")
 #: The SPS 1.0 provider id (`sps-provider.schema.json`), the one rule for every folder and manifest.
 #: Where a Python identifier is needed, replace `-` with `_` (`sps_provider_<id>`, the secret name
-#: `BOXROUTER_PROVIDER_<ID upper>_INTERNAL_<FIELD>`).
+#: `BOXROUTER_CONTRIBUTED_<ID upper>_<FIELD>`).
 PROVIDER_ID = re.compile(r"[a-z0-9-]{2,32}")
 PACKAGE_FILES = ("pyproject.toml", "uv.lock", "src")
 
