@@ -1,7 +1,7 @@
 name: release
 
 # One release per merge that changes a provider. The tag is the version. Only the release App may
-# create or move `v*` tags (ruleset `release tags`), so the tag step uses the App's token.
+# create or move `v*` tags (ruleset `release tags`), so the tag step uses that App's token.
 on:
   push:
     branches: [main]
@@ -24,22 +24,30 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
-      - name: Token for this repo (tags and release) and Cloud (repin dispatch)
-        id: app
+      - name: Release App token (tags and release, this repo only)
+        id: release_app
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: boxrouter
+          repositories: sandbox-providers
+          permission-contents: write
+      - name: Dispatch App token (Cloud workflows only)
+        id: dispatch_app
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
         with:
           app-id: ${{ vars.BOXROUTER_APP_ID }}
           private-key: ${{ secrets.BOXROUTER_APP_PRIVATE_KEY }}
           owner: boxrouter
-          repositories: |
-            sandbox-providers
-            cloud
+          repositories: cloud
+          permission-actions: write
       - name: Build the release files
         run: uv run --locked python scripts/release.py build --out dist
       - name: Tag and publish the release
         id: tag
         env:
-          GH_TOKEN: ${{ steps.app.outputs.token }}
+          GH_TOKEN: ${{ steps.release_app.outputs.token }}
           SHA: ${{ github.sha }}
         run: |
           set -eu
@@ -53,7 +61,7 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
       - name: Dispatch Cloud's repin
         env:
-          GH_TOKEN: ${{ steps.app.outputs.token }}
+          GH_TOKEN: ${{ steps.dispatch_app.outputs.token }}
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
           gh workflow run repin.yml --repo boxrouter/cloud \
