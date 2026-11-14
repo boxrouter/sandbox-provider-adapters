@@ -30,6 +30,7 @@ sandbox-providers/
 │       ├── brand/
 │       ├── OWNERS
 │       └── CHANGELOG.md
+│   └── <endpoint-provider>/   # a provider's own server: endpoint.yaml, OWNERS, brand/ (no package)
 └── .github/
     ├── CODEOWNERS
     └── workflows/
@@ -38,7 +39,7 @@ sandbox-providers/
         └── release.yml
 ```
 
-Each provider folder is its own Python project with its own lock, not a uv workspace member.
+Each provider folder is its own Python project with its own lock, not a uv workspace member. An endpoint folder (`endpoint.yaml`, no package) registers a server the provider runs itself.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution path and [REVIEW.md](REVIEW.md)
 for the first-pass review checklist. A dedicated release App and a `v*` tag ruleset are a

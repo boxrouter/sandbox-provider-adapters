@@ -6,10 +6,12 @@ that the OWNERS files imply. Neither runs provider code.
 """
 
 import argparse
+import ipaddress
 import re
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import tomllib
 import yaml
@@ -147,6 +149,75 @@ def check_manifest(provider: str, manifest: dict, shared: list[str]) -> list[str
     return failures
 
 
+ENDPOINT = "endpoint.yaml"
+ENDPOINT_FIELDS = ("provider_id", "name", "spec_version", "base_url")
+PROVIDER_ID = re.compile(r"[a-z][a-z0-9_]{0,63}")
+PACKAGE_FILES = ("pyproject.toml", "uv.lock", "src")
+
+
+def check_base_url(provider: str, base_url: object, shared: list[str]) -> list[str]:
+    """A native endpoint's base URL: https, a DNS name off the shared-hosting suffixes, no extras.
+
+    Discovery is `<base_url>/v1/discovery`, so the URL has no trailing slash, query or fragment.
+    """
+    if not isinstance(base_url, str):
+        return [f"{provider}: base_url is not text"]
+    parts = urlsplit(base_url)
+    if parts.scheme != "https":
+        return [f"{provider}: base_url must be https: {base_url}"]
+    host = (parts.hostname or "").lower()
+    if not host:
+        return [f"{provider}: base_url has no host: {base_url}"]
+    if parts.username is not None or parts.password is not None or parts.query or parts.fragment:
+        return [f"{provider}: base_url has credentials, a query or a fragment: {base_url}"]
+    if base_url.endswith("/"):
+        return [f"{provider}: base_url must not end with /: {base_url}"]
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        return [f"{provider}: base_url host is an IP address: {host}"]
+    if "." not in host:
+        return [f"{provider}: base_url host is not a public name: {host}"]
+    if any(host == banned or host.endswith("." + banned) for banned in shared):
+        return [f"{provider}: base_url host is on a shared-hosting suffix: {host}"]
+    return []
+
+
+def check_endpoint(root: Path, provider: str, shared: list[str]) -> list[str]:
+    """Check an endpoint-only folder: `endpoint.yaml` and no package files."""
+    folder = root / "providers" / provider
+    failures = [
+        f"{provider}: an endpoint folder must not hold {name} (it has no package)"
+        for name in PACKAGE_FILES
+        if (folder / name).exists()
+    ]
+    endpoint = yaml.safe_load((folder / ENDPOINT).read_text())
+    if not isinstance(endpoint, dict):
+        return [*failures, f"{provider}: {ENDPOINT} is not a mapping"]
+    failures += [
+        f"{provider}: {ENDPOINT} is missing {field}"
+        for field in ENDPOINT_FIELDS
+        if field not in endpoint
+    ]
+    failures += [
+        f"{provider}: {ENDPOINT} has an unknown field {field}"
+        for field in sorted(set(endpoint) - set(ENDPOINT_FIELDS))
+    ]
+    if "provider_id" in endpoint and endpoint["provider_id"] != provider:
+        failures.append(f"{provider}: {ENDPOINT} provider_id is {endpoint['provider_id']!r}")
+    if not PROVIDER_ID.fullmatch(provider):
+        failures.append(f"{provider}: the folder name is not a lowercase identifier")
+    if "name" in endpoint and not (isinstance(endpoint["name"], str) and endpoint["name"].strip()):
+        failures.append(f"{provider}: {ENDPOINT} name is empty")
+    if "spec_version" in endpoint and endpoint["spec_version"] != "1.0":
+        failures.append(f"{provider}: {ENDPOINT} spec_version must be '1.0'")
+    if "base_url" in endpoint:
+        failures += check_base_url(provider, endpoint["base_url"], shared)
+    return failures + check_owners(root, provider)
+
+
 def check_owners(root: Path, provider: str) -> list[str]:
     if read_owners(root, provider):
         return []
@@ -168,6 +239,8 @@ def check_folder(
     root: Path, base: str, provider: str, policy: dict, shared: list[str]
 ) -> list[str]:
     folder = root / "providers" / provider
+    if (folder / ENDPOINT).is_file():
+        return check_endpoint(root, provider, shared)
     missing = [n for n in ("pyproject.toml", "uv.lock") if not (folder / n).is_file()]
     if missing:
         return [f"{provider}: {name} is missing" for name in missing]

@@ -147,3 +147,97 @@ def test_stale_codeowners_fails(repo: Repo) -> None:
         "CODEOWNERS is out of date; "
         "run scripts/check_provider.py --print-codeowners > .github/CODEOWNERS\n",
     )
+
+
+ENDPOINT = "providers/pingo/endpoint.yaml"
+ENDPOINT_TEXT = (
+    "provider_id: pingo\nname: Pingo\nspec_version: '1.0'\nbase_url: https://api.pingo.test/box\n"
+)
+TWO_OWNERS = "/providers/acme/ @acme-dev\n/providers/pingo/ @pingo-dev\n"
+
+
+def add_endpoint(repo: Repo, text: str = ENDPOINT_TEXT) -> None:
+    repo.write(ENDPOINT, text)
+    repo.write("providers/pingo/OWNERS", "@pingo-dev\n")
+    repo.write(".github/CODEOWNERS", TWO_OWNERS)
+
+
+def test_endpoint_folder_without_a_package_passes(repo: Repo) -> None:
+    outcome = repo.check(add_endpoint)
+    assert (outcome.code, outcome.stdout, outcome.stderr) == (0, OK, "")
+
+
+def test_endpoint_folder_with_brand_files_passes(repo: Repo) -> None:
+    def change(r: Repo) -> None:
+        add_endpoint(r)
+        r.write("providers/pingo/brand/mark.svg", "<svg/>\n")
+
+    outcome = repo.check(change)
+    assert (outcome.code, outcome.stdout) == (0, OK)
+
+
+def test_endpoint_url_problems_fail(repo: Repo) -> None:
+    cases = {
+        "https://api.pingo.test/box/": "pingo: base_url must not end with /: https://api.pingo.test/box/\n",
+        "http://api.pingo.test": "pingo: base_url must be https: http://api.pingo.test\n",
+        "https://10.0.0.5/box": "pingo: base_url host is an IP address: 10.0.0.5\n",
+        "https://localhost/box": "pingo: base_url host is not a public name: localhost\n",
+        "https://u:p@api.pingo.test": (
+            "pingo: base_url has credentials, a query or a fragment: https://u:p@api.pingo.test\n"
+        ),
+        "https://api.pingo.test/box?x=1": (
+            "pingo: base_url has credentials, a query or a fragment: https://api.pingo.test/box?x=1\n"
+        ),
+        "https://abc.execute.amazonaws.com": (
+            "pingo: base_url host is on a shared-hosting suffix: abc.execute.amazonaws.com\n"
+        ),
+        "https://amazonaws.com": "pingo: base_url host is on a shared-hosting suffix: amazonaws.com\n",
+    }
+    for url, message in cases.items():
+        fresh = repo.fresh()
+        outcome = fresh.check(
+            lambda r, url=url: add_endpoint(r, ENDPOINT_TEXT.replace("https://api.pingo.test/box", url))
+        )
+        assert (outcome.code, outcome.stderr) == (1, message), url
+
+
+def test_endpoint_field_problems_fail(repo: Repo) -> None:
+    def change(r: Repo) -> None:
+        add_endpoint(r, "provider_id: other\nname: ' '\nspec_version: 1.0\nbase_url: https://a.test\nx: 1\n")
+
+    outcome = repo.check(change)
+    assert (outcome.code, outcome.stderr) == (
+        1,
+        "pingo: endpoint.yaml has an unknown field x\n"
+        "pingo: endpoint.yaml provider_id is 'other'\n"
+        "pingo: endpoint.yaml name is empty\n"
+        "pingo: endpoint.yaml spec_version must be '1.0'\n",
+    )
+
+
+def test_endpoint_missing_fields_and_owners_fail(repo: Repo) -> None:
+    def change(r: Repo) -> None:
+        r.write(ENDPOINT, "provider_id: pingo\nname: Pingo\n")
+        r.write(".github/CODEOWNERS", "/providers/acme/ @acme-dev\n")
+
+    outcome = repo.check(change)
+    assert (outcome.code, outcome.stderr) == (
+        1,
+        "pingo: endpoint.yaml is missing spec_version\n"
+        "pingo: endpoint.yaml is missing base_url\n"
+        "pingo: OWNERS is missing or lists no handle\n",
+    )
+
+
+def test_endpoint_folder_with_package_files_fails(repo: Repo) -> None:
+    def change(r: Repo) -> None:
+        add_endpoint(r)
+        r.write("providers/pingo/pyproject.toml", "[project]\nname = 'x'\n")
+        r.write("providers/pingo/src/x.py", "\n")
+
+    outcome = repo.check(change)
+    assert (outcome.code, outcome.stderr) == (
+        1,
+        "pingo: an endpoint folder must not hold pyproject.toml (it has no package)\n"
+        "pingo: an endpoint folder must not hold src (it has no package)\n",
+    )

@@ -5,6 +5,10 @@ are templates and are skipped): `<wheel>`, `requirements-<p>.txt`, `declarations
 `providers.lock`. `release.py next-tag` prints the next `vX.Y.Z`. Neither runs provider code:
 declarations are read from `pyproject.toml` and `sps-provider.yaml`.
 
+A folder holding `endpoint.yaml` is a native endpoint: the provider runs its own server, so the
+folder has no package. It is listed in `declarations.json` (with `endpoint: {base_url}`) and gets
+no wheel, no requirements file and no `providers.lock` line.
+
 Two builds of one commit are byte-identical: wheels are built with `SOURCE_DATE_EPOCH` set to
 the commit time, and every JSON and lock file has a fixed order.
 
@@ -32,6 +36,7 @@ import yaml
 SPS_PACKAGE = "sandbox-provider-spec"
 DECLARATIONS = "declarations.json"
 LOCK = "providers.lock"
+ENDPOINT = "endpoint.yaml"
 SCHEMA = 1
 TAG = re.compile(r"v(\d+)\.(\d+)\.(\d+)")
 
@@ -90,6 +95,27 @@ def read_declaration(root: Path, provider: str) -> dict:
     }
 
 
+def read_endpoint(root: Path, provider: str) -> dict:
+    """A native endpoint's declaration: its `endpoint.yaml` and the one bearer token it takes."""
+    folder = root / "providers" / provider
+    endpoint = yaml.safe_load((folder / ENDPOINT).read_text())
+    if endpoint.get("provider_id") != provider:
+        sys.exit(f"{provider}: {ENDPOINT} provider_id is {endpoint.get('provider_id')!r}")
+    return {
+        "provider_id": provider,
+        "name": endpoint["name"],
+        "spec_version": endpoint["spec_version"],
+        "credential_fields": [
+            {
+                "name": "api_key",
+                "secret": True,
+                "description": f"API key for {endpoint['name']}",
+            }
+        ],
+        "endpoint": {"base_url": endpoint["base_url"]},
+    }
+
+
 def check_requirements(provider: str, text: str) -> None:
     """Every requirement line is `name==version` with hashes: no path, URL or VCS source."""
     for line in text.splitlines():
@@ -125,6 +151,9 @@ def build(root: Path, out: Path) -> None:
     declarations: dict[str, dict] = {}
     lock_lines: list[str] = []
     for provider in providers:
+        if (root / "providers" / provider / ENDPOINT).is_file():
+            declarations[provider] = read_endpoint(root, provider)
+            continue
         declaration = read_declaration(root, provider)
         wheel = build_wheel(root, provider, out, epoch)
         requirements = run(
