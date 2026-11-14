@@ -27,3 +27,10 @@
 12. Refuse shared-hosting suffixes such as `amazonaws.com`, `cloudfront.net` and `googleapis.com`.
     A provider using shared hosting declares exact hostnames. Call out changes to domains or
     account fields in the review comment.
+
+## Release tags (P5 hardening item)
+
+`release.yml` tags and publishes with the workflow's own `GITHUB_TOKEN`. No ruleset restricts
+`v*` tags yet, so a maintainer with write access can create one by hand. Before the repository
+becomes public (P5), add a dedicated release App and a tag ruleset that lets only that App
+create or move `v*` tags. Review every change to `.github/workflows/` as a release-rights change.

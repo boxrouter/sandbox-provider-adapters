@@ -41,4 +41,5 @@ sandbox-providers/
 Each provider folder is its own Python project with its own lock, not a uv workspace member.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution path and [REVIEW.md](REVIEW.md)
-for the first-pass review checklist.
+for the first-pass review checklist. A dedicated release App and a `v*` tag ruleset are a
+hardening item for the public launch (P5); until then `release.yml` tags with its own token.

@@ -1,7 +1,8 @@
 name: release
 
-# One release per merge that changes a provider. The tag is the version. Only the release App may
-# create or move `v*` tags (ruleset `release tags`), so the tag step uses that App's token.
+# One release per merge that changes a provider. The tag is the version. The workflow's own token
+# tags and publishes; fork pull requests never run this workflow. A dedicated release App with a
+# tag ruleset is a P5 (public launch) hardening item; see REVIEW.md.
 on:
   push:
     branches: [main]
@@ -18,21 +19,14 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 0
           persist-credentials: false
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
-      - name: Release App token (tags and release, this repo only)
-        id: release_app
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
-        with:
-          app-id: ${{ vars.RELEASE_APP_ID }}
-          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-          owner: boxrouter
-          repositories: sandbox-providers
-          permission-contents: write
       - name: Dispatch App token (Cloud workflows only)
         id: dispatch_app
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
@@ -47,7 +41,7 @@ jobs:
       - name: Tag and publish the release
         id: tag
         env:
-          GH_TOKEN: ${{ steps.release_app.outputs.token }}
+          GH_TOKEN: ${{ github.token }}
           SHA: ${{ github.sha }}
         run: |
           set -eu
