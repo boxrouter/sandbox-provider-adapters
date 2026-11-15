@@ -1,0 +1,24 @@
+name: Bug report
+description: A check, release step or registered adapter does not behave as documented
+title: "Bug: "
+body:
+  - type: input
+    id: where
+    attributes:
+      label: Provider folder, script or workflow
+      description: For example `providers/example`, `scripts/check_provider.py` or `release.yml`.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Release tag or commit
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: What you ran, what happened and what you expected
+      description: Remove credentials, tokens and account IDs from logs before pasting them.
+    validations:
+      required: true

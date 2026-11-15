@@ -1,0 +1,25 @@
+name: Provider request
+description: Ask for a provider to be added, or for an adapter to be corrected
+title: "Provider: "
+body:
+  - type: input
+    id: provider
+    attributes:
+      label: Provider name and website
+    validations:
+      required: true
+  - type: dropdown
+    id: path
+    attributes:
+      label: How the provider would be registered
+      options:
+        - An adapter in this repository (providers/<id>/ with a package)
+        - The provider's own SPS 1.0 server (providers/<id>/ with endpoint.yaml)
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Link public documentation. Never post an API key or a test-account credential.
