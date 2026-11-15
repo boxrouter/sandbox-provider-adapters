@@ -9,7 +9,7 @@ permissions:
 # The newest push to a pull request supersedes the run still checking the old head.
 concurrency:
   group: checks-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   checks:
