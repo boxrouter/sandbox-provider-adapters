@@ -130,7 +130,7 @@ def test_owners_and_matching_codeowners_pass(repo: Repo) -> None:
     def change(r: Repo) -> None:
         bump_version(r)
         r.write(OWNERS, "# maintainers\n@acme-dev @acme-ops\n")
-        r.write(".github/CODEOWNERS", "/providers/acme/ @acme-dev @acme-ops\n")
+        r.write(".github/CODEOWNERS", "* @boxrouter/maintainers\n/providers/acme/ @acme-dev @acme-ops\n")
 
     outcome = repo.check(change)
     assert (outcome.code, outcome.stdout) == (0, OK)
@@ -153,7 +153,7 @@ ENDPOINT = "providers/pingo/endpoint.yaml"
 ENDPOINT_TEXT = (
     "provider_id: pingo\nname: Pingo\nspec_version: '1.0'\nbase_url: https://api.pingo.test/box\n"
 )
-TWO_OWNERS = "/providers/acme/ @acme-dev\n/providers/pingo/ @pingo-dev\n"
+TWO_OWNERS = "* @boxrouter/maintainers\n/providers/acme/ @acme-dev\n/providers/pingo/ @pingo-dev\n"
 
 
 def add_endpoint(repo: Repo, text: str = ENDPOINT_TEXT) -> None:
@@ -218,7 +218,7 @@ def test_endpoint_field_problems_fail(repo: Repo) -> None:
 def test_endpoint_missing_fields_and_owners_fail(repo: Repo) -> None:
     def change(r: Repo) -> None:
         r.write(ENDPOINT, "provider_id: pingo\nname: Pingo\n")
-        r.write(".github/CODEOWNERS", "/providers/acme/ @acme-dev\n")
+        r.write(".github/CODEOWNERS", "* @boxrouter/maintainers\n/providers/acme/ @acme-dev\n")
 
     outcome = repo.check(change)
     assert (outcome.code, outcome.stderr) == (
@@ -253,7 +253,7 @@ def add_hyphenated_adapter(repo: Repo) -> None:
             if source.name != "OWNERS":
                 text = text.replace("acme", "zzsynthetic-adapter")
             repo.write(f"providers/zzsynthetic-adapter/{target}", text)
-    repo.write(".github/CODEOWNERS", "/providers/acme/ @acme-dev\n/providers/zzsynthetic-adapter/ @acme-dev\n")
+    repo.write(".github/CODEOWNERS", "* @boxrouter/maintainers\n/providers/acme/ @acme-dev\n/providers/zzsynthetic-adapter/ @acme-dev\n")
 
 
 def test_hyphenated_adapter_folder_passes(repo: Repo) -> None:
@@ -266,7 +266,7 @@ def test_hyphenated_endpoint_folder_passes(repo: Repo) -> None:
         folder = "providers/pingo-box"
         r.write(f"{folder}/endpoint.yaml", ENDPOINT_TEXT.replace("provider_id: pingo", "provider_id: pingo-box"))
         r.write(f"{folder}/OWNERS", "@pingo-dev\n")
-        r.write(".github/CODEOWNERS", "/providers/acme/ @acme-dev\n/providers/pingo-box/ @pingo-dev\n")
+        r.write(".github/CODEOWNERS", "* @boxrouter/maintainers\n/providers/acme/ @acme-dev\n/providers/pingo-box/ @pingo-dev\n")
 
     outcome = repo.check(change)
     assert (outcome.code, outcome.stdout, outcome.stderr) == (0, OK, "")

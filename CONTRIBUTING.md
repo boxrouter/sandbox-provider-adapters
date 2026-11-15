@@ -2,17 +2,25 @@
 
 ## Add a provider
 
-1. Copy the adapter template from `cloud/packages/sandbox-provider-spec/template/` into
-   `providers/<provider>/`.
-2. Complete the provider project, `sps-provider.yaml` manifest, offline tests, `OWNERS`, brand files and
-   changelog for that provider.
-3. Run the SPS tester against the adapter or its served URL, using the provider's test-account
-   environment variable. The interface assumed by this design is
-   `sandbox-provider-test <adapter-or-url> --account-env <VAR>`.
-4. Open a pull request for review. Keep the change inside that provider's folder.
+An adapter implements the [Sandbox Provider Spec](https://github.com/boxrouter/sandbox-provider-spec)
+(SPS) 1.0 operations over the provider's own API. The spec repository's
+[provider kit](https://github.com/boxrouter/sandbox-provider-spec/blob/main/docs/how-to/provider-kit.md)
+and [declaration guide](https://github.com/boxrouter/sandbox-provider-spec/blob/main/spec/declarations.md)
+describe the contract and the evidence it asks for; this page describes this repository's side.
+
+1. Copy `providers/example/` to `providers/<provider>/`. It is the working template, with its own
+   README that shows how to run it. Rename the package and the provider id in `pyproject.toml`
+   and `src/<package>/sps-provider.yaml`, and replace each Example Cloud call with your API's.
+2. Complete the provider project: the `sps-provider.yaml` manifest, offline tests, `OWNERS`, brand
+   files and `CHANGELOG.md`.
+3. Run the SPS tester against the adapter, naming each credential field and the environment
+   variable that holds it (as the template's README shows):
+   `sandbox-provider-spec test <provider> --credential <field>=<ENV_VAR>`.
+4. Open a pull request. Keep the change inside that provider's folder and regenerate
+   `.github/CODEOWNERS` as `scripts/check_provider.py` says.
 
 Test-account credentials never go in a pull request, commit, source file or log. Keep them out of
-all review text and use the approved secure credential flow for test runs.
+all review text. A maintainer arranges the provider's test account for the live run.
 
 ## Provider ids
 
@@ -38,7 +46,7 @@ and the URL has no trailing slash, query, fragment or user info. There is no `py
 wheel, requirements file or `providers.lock` line: the release lists the folder in
 `declarations.json` as `endpoint: {base_url}` with one secret `api_key` field, and Cloud opens
 it at that URL with each workspace's own key. Run the SPS tester against the URL
-(`sandbox-provider-test <url> --account-env <VAR>`) before opening the pull request. Contact
+(`sandbox-provider-spec test <url> --credential token=<ENV_VAR>`) before opening the pull request. Contact
 addresses never go in this repository.
 
 ## Updates by the owning provider

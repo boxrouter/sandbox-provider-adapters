@@ -49,8 +49,12 @@ def read_owners(root: Path, provider: str) -> list[str]:
     return [handle for line in lines for handle in line.split() if handle.startswith("@")]
 
 
+MAINTAINERS = "@boxrouter/maintainers"
+
+
 def codeowners(root: Path) -> str:
-    lines = []
+    """Maintainers own every path; a provider's own handles own its folder (the last match wins)."""
+    lines = [f"* {MAINTAINERS}\n"]
     for provider in provider_dirs(root):
         owners = read_owners(root, provider)
         if owners:
