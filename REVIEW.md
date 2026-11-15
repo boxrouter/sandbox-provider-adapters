@@ -40,9 +40,9 @@ An endpoint folder (`endpoint.yaml`, no package) has no code to read, so review 
 4. A later change of `base_url` points Cloud's traffic at another host: treat it as a domain
    change and call it out in the review comment.
 
-## Release tags (P5 hardening item)
+## Release tags
 
-`release.yml` tags and publishes with the workflow's own `GITHUB_TOKEN`. No ruleset restricts
-`v*` tags yet, so a maintainer with write access can create one by hand. Before the repository
-becomes public (P5), add a dedicated release App and a tag ruleset that lets only that App
-create or move `v*` tags. Review every change to `.github/workflows/` as a release-rights change.
+`release.yml` tags and publishes with the BoxRouter Providers Release App, whose key is a secret of
+the `release` environment (deployments from `main` only). The `v*` tag ruleset lets only that App
+create, move or delete a tag, so a maintainer cannot tag by hand. Review every change to
+`.github/workflows/` as a release-rights change; `CODEOWNERS` assigns it to the maintainers.
