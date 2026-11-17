@@ -32,12 +32,11 @@ from pathlib import Path
 
 import tomllib
 import yaml
-from check_provider import PROVIDER_ID
+from check_provider import ENDPOINT, PROVIDER_ID, normalize, provider_dirs
 
 SPS_PACKAGE = "sandbox-provider-spec"
 DECLARATIONS = "declarations.json"
 LOCK = "providers.lock"
-ENDPOINT = "endpoint.yaml"
 SCHEMA = 1
 TAG = re.compile(r"v(\d+)\.(\d+)\.(\d+)")
 
@@ -58,17 +57,6 @@ def run(args: list[str], env: dict[str, str] | None = None, cwd: Path | None = N
 
 def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def normalize(name: str) -> str:
-    return re.sub(r"[-_.]+", "-", name).lower()
-
-
-def provider_dirs(root: Path) -> list[str]:
-    providers = root / "providers"
-    if not providers.is_dir():
-        return []
-    return sorted(p.name for p in providers.iterdir() if p.is_dir() and not p.name.startswith("_"))
 
 
 def sps_requirement(project: dict) -> str:
