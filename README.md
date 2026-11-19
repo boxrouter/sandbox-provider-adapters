@@ -9,8 +9,10 @@ locked requirements and a `declarations.json` for all providers.
 
 To add a provider, read [CONTRIBUTING.md](CONTRIBUTING.md). Maintainers review pull requests with
 [REVIEW.md](REVIEW.md). Report a vulnerability as [SECURITY.md](SECURITY.md) says. The code is
-licensed under Apache-2.0 ([LICENSE](LICENSE)); provider brand files are the owners' trademarks
-([NOTICE](NOTICE)).
+source-available under the PolyForm Shield License 1.0.0 ([LICENSE](LICENSE)), which is not an
+OSI-approved licence: you may use, modify and share it for any purpose except building a product that competes
+with BoxRouter. Releases published before this licence keep the licence they carry, and provider
+brand files are the owners' trademarks ([NOTICE](NOTICE)).
 
 ## Repository layout
 
@@ -21,6 +23,7 @@ sandbox-providers/
 ├── REVIEW.md
 ├── SECURITY.md
 ├── LICENSE
+├── LICENSES/
 ├── NOTICE
 ├── policy/
 │   ├── allowed-dependencies.yaml

@@ -58,6 +58,15 @@ An owning provider's update must:
 3. Pass `live.yml` on the final pull-request head SHA.
 4. Complete the agent review, then receive a maintainer merge.
 
+## Licence Of Your Contribution
+
+You keep the copyright in your contribution, and the sign-off below stays. By submitting it you
+confirm that you have the right to, and you license it to BoxRouter, Inc. under a perpetual,
+worldwide, non-exclusive, royalty-free, irrevocable licence to use, modify, distribute, sublicense
+and relicense it. You also license it to everyone under the PolyForm Shield License 1.0.0 as part of
+this repository (see [LICENSE](LICENSE)). If your employer owns the work, the employer must be the
+contributor. Your own use of your adapter elsewhere is not limited by this licence.
+
 ## Developer Certificate of Origin
 
 Every commit carries a `Signed-off-by:` line; see <https://developercertificate.org/>.

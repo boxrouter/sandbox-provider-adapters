@@ -1,5 +1,5 @@
 <!-- SPDX-FileCopyrightText: BoxRouter, Inc. -->
-<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- SPDX-License-Identifier: PolyForm-Shield-1.0.0 -->
 
 # Template: an SPS 1.0 provider adapter
 

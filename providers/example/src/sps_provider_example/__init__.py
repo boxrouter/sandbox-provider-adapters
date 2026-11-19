@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: BoxRouter, Inc.
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: PolyForm-Shield-1.0.0
 """The template adapter: a 1.0 `Provider` over Example Cloud (`template/fake_cloud/`).
 
 Example Cloud's API is deliberately not shaped like the standard, so each method shows a real

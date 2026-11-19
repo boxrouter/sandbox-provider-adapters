@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: BoxRouter, Inc.
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: PolyForm-Shield-1.0.0
 """What Example Cloud offers: the facts behind discovery. No Example Cloud call returns them."""
 
 from __future__ import annotations

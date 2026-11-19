@@ -32,7 +32,7 @@ from pathlib import Path
 
 import tomllib
 import yaml
-from check_provider import ENDPOINT, PROVIDER_ID, normalize, provider_dirs
+from check_provider import ENDPOINT, LICENSE_EXPRESSION, PROVIDER_ID, normalize, provider_dirs
 
 SPS_PACKAGE = "sandbox-provider-spec"
 DECLARATIONS = "declarations.json"
@@ -71,6 +71,8 @@ def sps_requirement(project: dict) -> str:
 def read_declaration(root: Path, provider: str) -> dict:
     folder = root / "providers" / provider
     project = tomllib.loads((folder / "pyproject.toml").read_text())["project"]
+    if project.get("license") != LICENSE_EXPRESSION:
+        sys.exit(f"{provider}: pyproject.toml license must be {LICENSE_EXPRESSION!r}")
     manifests = list(folder.glob("src/*/sps-provider.yaml")) + list(folder.glob("sps-provider.yaml"))
     if len(manifests) != 1:
         sys.exit(f"{provider}: expected one sps-provider.yaml, found {len(manifests)}")

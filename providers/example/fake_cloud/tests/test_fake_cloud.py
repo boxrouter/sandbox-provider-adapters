@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: BoxRouter, Inc.
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: PolyForm-Shield-1.0.0
 """Black-box tests for Example Cloud over its HTTP API."""
 
 from __future__ import annotations
