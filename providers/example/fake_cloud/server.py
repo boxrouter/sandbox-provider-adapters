@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: BoxRouter, Inc.
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: PolyForm-Shield-1.0.0
 """Example Cloud: a small fake machine provider over HTTP.
 
 Runs each machine as a local Docker container so tools can exercise a

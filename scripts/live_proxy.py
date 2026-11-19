@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: BoxRouter, Inc.
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: PolyForm-Shield-1.0.0
 """A CONNECT proxy for the live suite that allows only a provider's declared hosts.
 
 It reads `api_domains` from a provider's `sps-provider.yaml`: an entry is an exact host, or a

@@ -1,1 +1,7 @@
-Copyright BoxRouter, Inc. and contributors. Files under `providers/*/brand/` are trademarks of their owners, are not licensed under Apache-2.0, and are used with the owner's permission to list the provider.
+Copyright BoxRouter, Inc. and contributors.
+
+Releases `v0.1.0` to `v0.1.5` of this repository were published under Apache-2.0. Later releases are published under the PolyForm Shield License 1.0.0 (`PolyForm-Shield-1.0.0`, see [LICENSE](LICENSE)). Two files copied unchanged from the Sandbox Provider Spec template stay under Apache-2.0 (text in `LICENSES/Apache-2.0.txt`): `providers/example/fake_cloud/tests/conftest.py` and `providers/example/src/sps_provider_example/create_spec.py`.
+
+A provider that contributes an adapter keeps ownership of it, and keeps the right to use that adapter anywhere, under any terms.
+
+Files under `providers/*/brand/` are trademarks of their owners, are not licensed under this repository's licence, and are used with the owner's permission to list the provider.

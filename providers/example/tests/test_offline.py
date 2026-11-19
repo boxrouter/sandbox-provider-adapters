@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: BoxRouter, Inc.
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: PolyForm-Shield-1.0.0
 """Offline tests for the template adapter.
 
 A small in-memory Example Cloud sits behind `httpx.MockTransport` and answers

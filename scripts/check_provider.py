@@ -17,6 +17,9 @@ import tomllib
 import yaml
 
 MAX_DECLARED = 8
+# Wheel metadata (PEP 639) says "LicenseRef-" because hatchling does not know the SPDX id
+# PolyForm-Shield-1.0.0; source headers use the plain id. Same form as the boxrouter client wheel.
+LICENSE_EXPRESSION = "LicenseRef-PolyForm-Shield-1.0.0"
 CODEOWNERS = ".github/CODEOWNERS"
 VERSION = re.compile(r"\d+(\.\d+)*")
 REQUIREMENT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
@@ -95,6 +98,14 @@ def check_dependencies(provider: str, pyproject: dict, policy: dict) -> list[str
         f"{provider}: dependency not on the allowlist: {name}"
         for name in sorted(direct_dependencies(pyproject) - allowed)
     ]
+
+
+def check_license(provider: str, pyproject: dict) -> list[str]:
+    """An adapter carries the repository licence in its wheel metadata."""
+    found = pyproject.get("project", {}).get("license")
+    if found == LICENSE_EXPRESSION:
+        return []
+    return [f"{provider}: pyproject.toml license must be {LICENSE_EXPRESSION!r}, found {found!r}"]
 
 
 def check_wheels(provider: str, lock: dict) -> list[str]:
@@ -253,6 +264,7 @@ def check_folder(
         return [f"{provider}: {name} is missing" for name in missing]
     pyproject = tomllib.loads((folder / "pyproject.toml").read_text())
     failures = check_dependencies(provider, pyproject, policy)
+    failures += check_license(provider, pyproject)
     failures += check_wheels(provider, tomllib.loads((folder / "uv.lock").read_text()))
     failures += check_version(root, base, provider, pyproject.get("project", {}).get("version", ""))
     manifests = sorted(folder.glob("src/*/sps-provider.yaml"))

@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: BoxRouter, Inc.
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: PolyForm-Shield-1.0.0
 """Example Cloud's machine backend: one Docker container per machine.
 
 Machines are plain Docker containers whose main process is ``sleep <ttl>``

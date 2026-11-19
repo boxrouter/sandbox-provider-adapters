@@ -56,6 +56,18 @@ def test_dependency_off_the_allowlist_fails(repo: Repo) -> None:
     )
 
 
+def test_adapter_licence_other_than_the_repository_licence_fails(repo: Repo) -> None:
+    def change(r: Repo) -> None:
+        bump_version(r)
+        r.edit(PYPROJECT, 'license = "LicenseRef-PolyForm-Shield-1.0.0"', 'license = "MIT"')
+
+    outcome = repo.check(change)
+    assert (outcome.code, outcome.stderr) == (
+        1,
+        "acme: pyproject.toml license must be 'LicenseRef-PolyForm-Shield-1.0.0', found 'MIT'\n",
+    )
+
+
 def test_locked_package_with_a_wheel_passes(repo: Repo) -> None:
     def change(r: Repo) -> None:
         bump_version(r)
