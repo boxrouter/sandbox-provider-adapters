@@ -1,7 +1,7 @@
 # Sandbox provider adapters
 
 > [!NOTE]
-> **Sandbox providers are invited to contribute.** If you run a sandbox service, you can add a Python adapter over your existing API or register your own SPS 1.0 server endpoint by following [CONTRIBUTING.md](CONTRIBUTING.md).
+> **Sandbox providers are invited to contribute.** If you run a sandbox service, apply at <https://boxrouter.ai/providers>. We can write the adapter over your public API, or you can add one, or register your own SPS 1.0 server endpoint. [CONTRIBUTING.md](CONTRIBUTING.md) lists the steps from application to going live.
 
 This repository holds contributed provider integrations for the [Sandbox Provider Spec](https://github.com/boxrouter/sandbox-provider-spec) (SPS). SPS defines the standard 1.0 interface and capability declarations for code execution sandboxes; this repository packages the provider implementations and releases them for tools and consumers that speak SPS.
 
