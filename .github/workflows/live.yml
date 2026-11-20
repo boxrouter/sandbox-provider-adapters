@@ -55,7 +55,8 @@ jobs:
           gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" \
             --jq '.[] | .filename, (.previous_filename // empty)' | sort -u > paths.txt
           folders=$(sed -n 's|^providers/\([^/_][^/]*\)/.*|\1|p' paths.txt | sort -u)
-          outside=$(grep -v '^providers/[^/_][^/]*/' paths.txt || true)
+          # CODEOWNERS is regenerated with a new provider folder (scripts/check_provider.py), so it may change with it.
+          outside=$(grep -v -e '^providers/[^/_][^/]*/' -e '^\.github/CODEOWNERS$' paths.txt || true)
           count=$(printf '%s\n' "$folders" | grep -c . || true)
           if [ "$count" -gt 1 ]; then
             echo "live-test runs on one provider folder; this PR changes: $(printf '%s\n' "$folders" | paste -sd, - | sed 's/,/, /g')"
@@ -120,6 +121,14 @@ jobs:
               print(name, "optional" if field.get("required") is False else "required")
           PY
           cat "$RUNNER_TEMP/fields.txt"
+      - name: Install the provider and the tester
+        # Before any credential is read. The folder's own groups come with it (the example's fake
+        # backend needs its `tools` group); the HTTP extra of the spec package serves the adapter
+        # and runs the tester, so a folder need not declare it.
+        run: |
+          set -eu
+          uv sync --locked --all-groups --project "pr/providers/$PROVIDER"
+          uv pip install --python "pr/providers/$PROVIDER/.venv/bin/python" "sandbox-provider-spec[http]"
       - name: Assume the provider's test-account role
         id: aws
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
@@ -139,7 +148,7 @@ jobs:
           : > "$RUNNER_TEMP/field-env.txt"
           while read -r field need; do
             upper=$(printf '%s' "$field" | tr 'a-z' 'A-Z')
-            name="BOXROUTER_PROVIDER_${id}_INTERNAL_${upper}"
+            name="BOXROUTER_CONTRIBUTED_${id}_${upper}"
             if ! value=$(aws secretsmanager get-secret-value --secret-id "$name" \
                 --query SecretString --output text 2>"$RUNNER_TEMP/aws-error.txt"); then
               if [ "$need" = optional ] && grep -q ResourceNotFoundException "$RUNNER_TEMP/aws-error.txt"; then
@@ -155,8 +164,6 @@ jobs:
             { echo "$var<<$delimiter"; printf '%s\n' "$value"; echo "$delimiter"; } >> "$GITHUB_ENV"
             echo "$field $var" >> "$RUNNER_TEMP/field-env.txt"
           done < "$RUNNER_TEMP/fields.txt"
-      - name: Install the provider and the tester
-        run: uv sync --locked --project "pr/providers/$PROVIDER" --group tools
       - name: Start the provider's local fake backend, if the folder ships one
         run: |
           set -eu
