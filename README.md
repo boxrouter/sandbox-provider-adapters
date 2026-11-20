@@ -1,18 +1,18 @@
 # Sandbox provider adapters
 
-This repository holds contributed adapters for the
-[Sandbox Provider Spec](https://github.com/boxrouter/sandbox-provider-spec) (SPS). A provider is
-either an adapter, a Python package that implements the SPS 1.0 operations over the provider's own
-API, or an endpoint, a pointer to an SPS 1.0 server the provider runs itself. Each provider has one
-folder under `providers/`. Every merge that changes a provider cuts a release with the wheels, the
-locked requirements and a `declarations.json` for all providers.
+> [!NOTE]
+> **Sandbox providers are invited to contribute.** If you run a sandbox service, you can add a Python adapter over your existing API or register your own SPS 1.0 server endpoint by following [CONTRIBUTING.md](CONTRIBUTING.md).
 
-To add a provider, read [CONTRIBUTING.md](CONTRIBUTING.md). Maintainers review pull requests with
-[REVIEW.md](REVIEW.md). Report a vulnerability as [SECURITY.md](SECURITY.md) says. The code is
-source-available under the PolyForm Shield License 1.0.0 ([LICENSE](LICENSE)), which is not an
-OSI-approved licence: you may use, modify and share it for any purpose except building a product that competes
-with BoxRouter. Releases published before this licence keep the licence they carry, and provider
-brand files are the owners' trademarks ([NOTICE](NOTICE)).
+This repository holds contributed provider integrations for the [Sandbox Provider Spec](https://github.com/boxrouter/sandbox-provider-spec) (SPS). SPS defines the standard 1.0 interface and capability declarations for code execution sandboxes; this repository packages the provider implementations and releases them for tools and consumers that speak SPS.
+
+Each provider has one folder under `providers/` in one of two forms:
+
+- **An adapter:** a Python package that implements the SPS 1.0 operations over the provider's own API.
+- **An endpoint:** an `endpoint.yaml` file that points to an SPS 1.0 HTTP server that the provider runs itself.
+
+Every merge that changes a provider folder cuts a release containing the built Python wheels, the locked dependency requirements, and a combined `declarations.json` file for all providers.
+
+To add or update a provider, read [CONTRIBUTING.md](CONTRIBUTING.md). Maintainers review pull requests against [REVIEW.md](REVIEW.md). Report a security vulnerability as [SECURITY.md](SECURITY.md) describes. The code is source-available under the PolyForm Shield License 1.0.0 ([LICENSE](LICENSE)), which is not an OSI-approved license: you may use, modify, and share the code for any purpose except building a product that competes with BoxRouter. Releases published before this license keep the license that they carry, and provider brand files are the trademarks of their respective owners ([NOTICE](NOTICE)).
 
 ## Repository layout
 
