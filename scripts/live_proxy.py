@@ -11,8 +11,6 @@ addresses matters in AWS, where the egress proxy does it.
     python scripts/live_proxy.py --manifest providers/<p>/sps-provider.yaml --port 3128
 """
 
-from __future__ import annotations
-
 import argparse
 import asyncio
 import contextlib
@@ -34,7 +32,7 @@ def read_allowlist(manifest: Path) -> tuple[frozenset[str], tuple[str, ...]]:
         raise SystemExit(f"{manifest}: api_domains must be a list of strings")
     cleaned = [item.strip().lower().rstrip(".") for item in domains]
     hosts = frozenset(item for item in cleaned if item and not item.startswith("."))
-    suffixes = tuple(item for item in cleaned if item.startswith(".") and len(item) > 1)
+    suffixes = tuple(item for item in cleaned if item.startswith("."))
     return hosts, suffixes
 
 
@@ -68,8 +66,9 @@ async def pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> No
             writer.close()
 
 
-def reply(writer: asyncio.StreamWriter, status: str) -> None:
+def refuse(writer: asyncio.StreamWriter, status: str) -> None:
     writer.write(f"HTTP/1.1 {status}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n".encode())
+    writer.close()
 
 
 def make_handler(hosts: frozenset[str], suffixes: tuple[str, ...]):
@@ -80,38 +79,24 @@ def make_handler(hosts: frozenset[str], suffixes: tuple[str, ...]):
             client_writer.close()
             return
         if len(head) > MAX_HEADER_BYTES:
-            reply(client_writer, "431 Request Header Fields Too Large")
-            client_writer.close()
-            return
+            return refuse(client_writer, "431 Request Header Fields Too Large")
         parts = head.split(b"\r\n", 1)[0].decode("latin-1").split()
         if len(parts) != 3 or parts[0] != "CONNECT":
-            reply(client_writer, "405 Method Not Allowed")
-            await client_writer.drain()
-            client_writer.close()
-            return
+            return refuse(client_writer, "405 Method Not Allowed")
         target = parse_target(parts[1])
         if target is None:
-            reply(client_writer, "400 Bad Request")
-            await client_writer.drain()
-            client_writer.close()
-            return
+            return refuse(client_writer, "400 Bad Request")
         host, port = target
         if not allowed(host, hosts, suffixes):
             print(f"live_proxy: refused {host}:{port}", file=sys.stderr, flush=True)
-            reply(client_writer, "403 Forbidden")
-            await client_writer.drain()
-            client_writer.close()
-            return
+            return refuse(client_writer, "403 Forbidden")
         try:
             upstream_reader, upstream_writer = await asyncio.wait_for(
                 asyncio.open_connection(host, port), CONNECT_TIMEOUT_S
             )
         except (OSError, asyncio.TimeoutError) as error:
             print(f"live_proxy: cannot reach {host}:{port}: {error}", file=sys.stderr, flush=True)
-            reply(client_writer, "502 Bad Gateway")
-            await client_writer.drain()
-            client_writer.close()
-            return
+            return refuse(client_writer, "502 Bad Gateway")
         print(f"live_proxy: allowed {host}:{port}", file=sys.stderr, flush=True)
         client_writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         await client_writer.drain()
