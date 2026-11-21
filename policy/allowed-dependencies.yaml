@@ -1,3 +1,4 @@
 global: [sandbox-provider-spec, httpx]
 providers:
+  blaxel: [websockets]
   example: [websockets]
