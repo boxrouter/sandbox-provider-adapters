@@ -5,7 +5,7 @@
 Runs each machine as a local Docker container so tools can exercise a
 provider-shaped API without a real account. Run it with:
 
-    python fake_cloud/server.py --port 18080 --state-dir /tmp/example-cloud
+    python template/fake_cloud/server.py --port 18080 --state-dir /tmp/example-cloud
 
 Every request needs a non-empty ``X-Api-Key`` header. The API is documented
 in README.md next to this file.

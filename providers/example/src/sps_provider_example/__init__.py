@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: BoxRouter, Inc.
 # SPDX-License-Identifier: PolyForm-Shield-1.0.0
-"""The template adapter: a 1.0 `Provider` over Example Cloud (`fake_cloud/`).
+"""The template adapter: a 1.0 `Provider` over Example Cloud (`template/fake_cloud/`).
 
 Example Cloud's API is deliberately not shaped like the standard, so each method shows a real
 translation; a comment above it names the Example Cloud call it maps. Example Cloud returns no
@@ -66,9 +66,6 @@ from sps_provider_example.facts import (
     MAX_RUN_S,
     MAX_WAIT_S,
     META_PATH,
-    PRICE_CPU,
-    PRICE_MEM,
-    PRICE_SNAPSHOT,
     REGION,
     TAG_BODY,
     TAG_IDEM,
@@ -480,8 +477,10 @@ class ExampleProvider(Provider):
             exit_code=log["code"] if done else None,
         )
 
-    async def cost(self, sandbox_id: str) -> Cost:
-        # GET /machines/{id}/usage; the price list in discovery prices the record.
+    async def cost(self, sandbox_id: str, *, created_at: datetime | None = None) -> Cost:
+        # GET /machines/{id}/usage. The lines carry quantities from Example Cloud's record and no
+        # amount: whoever bills from them prices them (the router, from the list prices).
+        # `created_at` is only a lookup hint, and the usage record states the start itself.
         usage = await self._json("GET", f"/machines/{sandbox_id}/usage")
         # `as_of` is when Example Cloud read its record, by its own clock; a running machine
         # counts up to it, and the line stays open (`end` null) until the machine ends.
@@ -492,14 +491,14 @@ class ExampleProvider(Provider):
         cpu_q = Decimal(str(usage["cpu"])) * seconds
         mem_q = Decimal(str(usage["memory_mb"])) / 1024 * seconds
         lines = (
-            CostLine("cpu", cpu_q * PRICE_CPU, cpu_q, "vcpu_second", start, end),
-            CostLine("memory", mem_q * PRICE_MEM, mem_q, "gib_second", start, end),
+            CostLine("cpu", None, cpu_q, "vcpu_second", start, end),
+            CostLine("memory", None, mem_q, "gib_second", start, end),
         )
         return Cost(
             sandbox_id=sandbox_id,
             status="final" if usage["ended"] else "accruing",
-            total_usd=sum(line.amount_usd for line in lines),
-            source="calculated",
+            total_usd=None,
+            source="usage",
             lines=lines,
             as_of=as_of,
         )
@@ -603,14 +602,12 @@ class ExampleProvider(Provider):
                 * seconds
                 / (3600 * HOURS_PER_MONTH)
             )
-            lines.append(
-                CostLine("snapshot", quantity * PRICE_SNAPSHOT, quantity, "gib_month", start, end)
-            )
+            lines.append(CostLine("snapshot", None, quantity, "gib_month", start, end))
         return Cost(
             sandbox_id=usage["machine_id"],
             status="final" if all(r["until"] for r in usage["records"]) else "accruing",
-            total_usd=sum((line.amount_usd for line in lines), start=Decimal(0)),
-            source="calculated",
+            total_usd=None,
+            source="usage",
             lines=tuple(lines),
             as_of=as_of,
             snapshot_id=snapshot_id,
