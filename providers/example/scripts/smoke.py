@@ -5,7 +5,7 @@
 Creates a sandbox, runs `echo hi`, writes and reads a file, destroys the
 sandbox and reads its cost, then prints `smoke ok`.
 
-    python scripts/smoke.py --endpoint http://127.0.0.1:18080 --api-key dev
+    python template/scripts/smoke.py --endpoint http://127.0.0.1:18080 --api-key dev
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ async def main() -> None:
 
     await provider.destroy(box.id)
     cost = await provider.cost(box.id)
-    assert cost.status == "final" and cost.source == "calculated", cost
+    assert cost.status == "final" and cost.source == "usage", cost
 
     await provider.aclose()
     print("smoke ok")

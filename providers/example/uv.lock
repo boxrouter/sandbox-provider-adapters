@@ -580,14 +580,14 @@ wheels = [
 
 [[package]]
 name = "sandbox-provider-spec"
-version = "0.5.33"
-source = { path = "vendor/sandbox_provider_spec-0.5.33-py3-none-any.whl" }
+version = "0.5.57"
+source = { path = "vendor/sandbox_provider_spec-0.5.57-py3-none-any.whl" }
 dependencies = [
     { name = "jsonschema" },
     { name = "pyyaml" },
 ]
 wheels = [
-    { filename = "sandbox_provider_spec-0.5.33-py3-none-any.whl", hash = "sha256:1a5654a7ca4abdae452bc89214f312a6ac66006de7c9e0ef0865282d7374537f" },
+    { filename = "sandbox_provider_spec-0.5.57-py3-none-any.whl", hash = "sha256:ec287f34e9a06e1506e04861a9832f671e02bab16e5c2e4c28e06c2036c27ca0" },
 ]
 
 [package.optional-dependencies]
@@ -618,7 +618,7 @@ provides-extras = ["blaxel", "browser", "daytona", "docker", "e2b", "http", "mod
 
 [[package]]
 name = "sps-provider-example"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
@@ -638,7 +638,7 @@ tools = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = "==0.28.1" },
-    { name = "sandbox-provider-spec", path = "vendor/sandbox_provider_spec-0.5.33-py3-none-any.whl" },
+    { name = "sandbox-provider-spec", path = "vendor/sandbox_provider_spec-0.5.57-py3-none-any.whl" },
     { name = "websockets", specifier = "==16.1.1" },
 ]
 
@@ -646,7 +646,7 @@ requires-dist = [
 dev = [{ name = "pytest", specifier = "==9.1.1" }]
 tools = [
     { name = "docker", specifier = "==7.2.0" },
-    { name = "sandbox-provider-spec", extras = ["http"], path = "vendor/sandbox_provider_spec-0.5.33-py3-none-any.whl" },
+    { name = "sandbox-provider-spec", extras = ["http"], path = "vendor/sandbox_provider_spec-0.5.57-py3-none-any.whl" },
 ]
 
 [[package]]
