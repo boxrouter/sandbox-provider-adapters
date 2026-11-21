@@ -1,0 +1,4 @@
+# Providers whose folder BoxRouter publishes from its own source (Cloud's export list).
+# A pull request that changes one of these folders fails the check unless the export App opens it;
+# the change is taken over into the source and lands through the next export.
+blaxel

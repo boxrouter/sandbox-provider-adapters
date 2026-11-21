@@ -1,6 +1,10 @@
 """One passing and one failing case for each check in scripts/check_provider.py."""
 
-from conftest import Repo
+import subprocess
+import sys
+from collections.abc import Callable
+
+from conftest import SCRIPT, Outcome, Repo
 
 PYPROJECT = "providers/acme/pyproject.toml"
 LOCK = "providers/acme/uv.lock"
@@ -306,3 +310,40 @@ def test_folder_names_outside_the_sps_rule_fail(repo: Repo) -> None:
         )
         assert outcome.code == 1, name
         assert f"{name}: the folder name does not match the SPS provider id" in outcome.stderr
+
+
+def owned_check(repo: Repo, author: str | None, change: Callable[[Repo], None]) -> Outcome:
+    repo.write("policy/cloud-owned-providers.txt", "# note\nacme\n")
+    repo.git("add", "-A")
+    repo.git("commit", "-q", "-m", "list")
+    args = ["--pr-author", author] if author else []
+    repo.git("switch", "-q", "-c", "pr")
+    change(repo)
+    repo.git("add", "-A")
+    repo.git("commit", "-q", "-m", "change")
+    done = subprocess.run(
+        [sys.executable, str(SCRIPT), "--root", str(repo.root), "--base", "main", *args],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return Outcome(done.returncode, done.stdout, done.stderr)
+
+
+def change_acme(r: Repo) -> None:
+    bump_version(r)
+    r.write("providers/acme/CHANGELOG.md", "0.1.1: fix\n")
+
+
+def test_a_pull_request_to_a_folder_boxrouter_maintains_fails(repo: Repo) -> None:
+    outcome = owned_check(repo, "someone", change_acme)
+    assert outcome.code == 1
+    assert "providers/acme/ is published from BoxRouter's own source" in outcome.stderr
+
+
+def test_the_export_app_may_change_a_folder_boxrouter_maintains(repo: Repo) -> None:
+    assert owned_check(repo, "boxrouter-export[bot]", change_acme).code == 0
+
+
+def test_without_a_pr_author_nothing_is_refused_for_ownership(repo: Repo) -> None:
+    assert owned_check(repo, None, change_acme).code == 0

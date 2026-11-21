@@ -16,6 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       BASE_REF: ${{ github.base_ref }}
+      PR_AUTHOR: ${{ github.event.pull_request.user.login }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -23,7 +24,7 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
       - name: Static provider checks
-        run: uv run --locked python scripts/check_provider.py --base "origin/$BASE_REF"
+        run: uv run --locked python scripts/check_provider.py --base "origin/$BASE_REF" --pr-author "$PR_AUTHOR"
       - name: Offline tests of each changed provider
         run: |
           set -eu

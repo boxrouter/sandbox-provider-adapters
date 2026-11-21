@@ -17,6 +17,9 @@ import tomllib
 import yaml
 
 MAX_DECLARED = 8
+# The only author that may change a folder BoxRouter maintains from its own source.
+EXPORT_AUTHOR = "boxrouter-export[bot]"
+OWNED_LIST = "policy/cloud-owned-providers.txt"
 # Wheel metadata (PEP 639) says "LicenseRef-" because hatchling does not know the SPDX id
 # PolyForm-Shield-1.0.0; source headers use the plain id. Same form as the boxrouter client wheel.
 LICENSE_EXPRESSION = "LicenseRef-PolyForm-Shield-1.0.0"
@@ -280,10 +283,40 @@ def check_folder(
     return failures + check_owners(root, provider)
 
 
-def run_checks(root: Path, base: str) -> tuple[list[str], int]:
+def cloud_owned(root: Path) -> set[str]:
+    """Provider ids whose folder BoxRouter publishes from its own source (one id per line)."""
+    path = root / OWNED_LIST
+    if not path.is_file():
+        return set()
+    lines = (line.split("#")[0].strip() for line in path.read_text().splitlines())
+    return {line for line in lines if line}
+
+
+def check_owned(folders: list[str], owned: set[str], author: str | None) -> list[str]:
+    """A pull request may not change a folder BoxRouter maintains, unless the export App opens it.
+
+    Without `--pr-author` (the export's own check of the commit it will publish) nothing is
+    refused here.
+    """
+    if author is None or author == EXPORT_AUTHOR:
+        return []
+    return [
+        f"providers/{folder}/ is published from BoxRouter's own source; "
+        "open the change as an issue and it is taken over there"
+        for folder in folders
+        if folder in owned
+    ]
+
+
+def run_checks(
+    root: Path, base: str, author: str | None = None
+) -> tuple[list[str], int]:
     failures, folders = check_scope(changed_paths(root, base))
     if failures:
         return failures, len(folders)  # the other checks say nothing useful about a rejected PR
+    failures = check_owned(folders, cloud_owned(root), author)
+    if failures:
+        return failures, len(folders)
     folders = [f for f in folders if f in provider_dirs(root)]  # a deleted folder has no checks
     policy = yaml.safe_load((root / "policy/allowed-dependencies.yaml").read_text()) or {}
     shared = (root / "policy/shared-hosting-suffixes.txt").read_text().split()
@@ -296,6 +329,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", help="git ref to compare HEAD with")
     parser.add_argument("--print-codeowners", action="store_true")
+    parser.add_argument(
+        "--pr-author", help="the pull request's author login; refuses changes to a folder BoxRouter maintains"
+    )
     parser.add_argument("--root", type=Path, default=Path("."), help="repository root")
     args = parser.parse_args()
     if args.print_codeowners:
@@ -303,7 +339,7 @@ def main() -> int:
         return 0
     if not args.base:
         parser.error("--base is required")
-    failures, count = run_checks(args.root, args.base)
+    failures, count = run_checks(args.root, args.base, args.pr_author)
     if failures:
         print("\n".join(failures), file=sys.stderr)
         return 1
