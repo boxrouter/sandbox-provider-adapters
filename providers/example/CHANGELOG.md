@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1
+
+- Vendor the SPS 0.5.62 wheel (the current release; adds `public_prefix` and the other optional parts since 0.5.57); `uv.lock` follows. The README now carries the template's sentence on `lifetime_enforced_by` and `ordered_sessions`. The adapter, fake backend, tests and smoke script are unchanged from the SPS template.
+
 ## 0.3.0
 
 - Vendor the SPS 0.5.57 wheel (the current release); `uv.lock` follows. Refresh the adapter, `fake_cloud/`, tests and `scripts/smoke.py` from the SPS template: `cost` and `snapshot_cost` report usage (no prices in the adapter; discovery states the list prices as data), `cost` takes the `created_at` hint, and the READMEs name the optional additions the example does not claim (run as a user, exact output bytes, prepared images) and the class facts `lifetime_enforced_by` and `ordered_sessions`.
