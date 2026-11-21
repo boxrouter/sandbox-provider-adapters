@@ -1,0 +1,188 @@
+{
+  "document": {
+    "classes": [
+      {
+        "gates": {
+          "custom_images": [
+            {
+              "prepared": true,
+              "source": "oci"
+            },
+            {
+              "build_context": true,
+              "prepared": true,
+              "source": "dockerfile"
+            },
+            {
+              "source": "provider_artifact"
+            }
+          ],
+          "hidden_secrets": [
+            {
+              "injection": "sets_header",
+              "intercepts": "all_https",
+              "rotates": "unknown",
+              "scrubs_responses": false,
+              "transparent": false
+            }
+          ],
+          "idle_shutdown": [
+            {
+              "on_idle": "paused"
+            }
+          ],
+          "previews": [
+            {
+              "access": "public",
+              "max_ports": {
+                "at_least": 2
+              },
+              "reserved_ports": [
+                8080
+              ],
+              "revocable": true
+            },
+            {
+              "access": "private",
+              "credential": [
+                "link",
+                "header"
+              ],
+              "max_ports": {
+                "at_least": 2
+              },
+              "reserved_ports": [
+                8080
+              ],
+              "revocable": true
+            }
+          ],
+          "processes": [
+            {
+              "cancel": true,
+              "input": true,
+              "reattach": true
+            }
+          ],
+          "terminal": [
+            {}
+          ],
+          "user_selection": [
+            {
+              "commands": true,
+              "files_write": true,
+              "process_start": true
+            }
+          ]
+        },
+        "id": "default",
+        "images": [
+          {
+            "default": true,
+            "description": "Blaxel's base image, with bash and python3",
+            "id": "blaxel-base"
+          }
+        ],
+        "lifetime_timer": {
+          "adjustable": true,
+          "at_end": [
+            "destroyed"
+          ],
+          "counts_from": "create",
+          "counts_paused_time": true,
+          "enforced_by": "provider",
+          "min_seconds": 300,
+          "step_seconds": "unknown"
+        },
+        "name": "Blaxel microVM",
+        "operations": [
+          "files.list",
+          "files.mkdir",
+          "files.remove",
+          "files.exists",
+          "run.base64",
+          "labels.update",
+          "image.prepare",
+          "image.get",
+          "image.list",
+          "image.delete"
+        ],
+        "prices": [],
+        "ready": true,
+        "resources": {
+          "default_cwd": "/blaxel",
+          "default_size": {
+            "cpu": 2,
+            "memory_mib": 4096
+          },
+          "default_user": "root",
+          "disk_in_memory": true,
+          "extendable_lifetime": true,
+          "kernel": "dedicated",
+          "max_lifetime_seconds": "unlimited",
+          "needs": {
+            "max_lifetime_seconds": [
+              "tier_2_or_higher"
+            ],
+            "paused_retention_seconds": [
+              "tier_2_or_higher"
+            ],
+            "regions": [
+              "region_enabled_for_workspace"
+            ]
+          },
+          "paused_retention_seconds": "unlimited",
+          "regions": [
+            "blaxel:us-pdx-1",
+            "blaxel:us-was-1",
+            "blaxel:eu-lon-1",
+            "blaxel:eu-fra-1"
+          ],
+          "size_is_ceiling": true,
+          "sizes": [
+            {
+              "cpu": 2,
+              "memory_mib": 4096
+            },
+            {
+              "cpu": 4,
+              "memory_mib": 8192
+            },
+            {
+              "cpu": 6,
+              "memory_mib": 16384
+            }
+          ],
+          "unmet_limits": {
+            "max_lifetime_seconds": {
+              "tier_2_or_higher": 604800
+            }
+          }
+        },
+        "unavailable_regions": []
+      }
+    ],
+    "limits": {
+      "account_cost_window_seconds": 604800,
+      "cost_final_within_seconds": 900,
+      "file_bytes": 1073741824,
+      "image_context_bytes": 536870912,
+      "list_limit": 100,
+      "output_bytes": 16777216,
+      "process_output_bytes": 1048576,
+      "process_retention_seconds": 600,
+      "run_timeout_ms": 600000,
+      "wait_ms": 30000
+    },
+    "provider": {
+      "docs_url": "https://docs.blaxel.ai",
+      "id": "blaxel",
+      "name": "Blaxel"
+    },
+    "spec_version": "1.0"
+  },
+  "price_digest": "sha256:9196b77d024c4ccd1680d8099957eab527aac27112b17982f2de52eef3619c26",
+  "provider": "blaxel",
+  "schema": 1,
+  "source": "sps-provider-blaxel discovery"
+}

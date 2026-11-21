@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: BoxRouter, Inc.
+# SPDX-License-Identifier: PolyForm-Shield-1.0.0
+provider_id: blaxel
+name: Blaxel
+spec_version: "1.0"
+credential_fields:
+  - name: api_key
+    secret: true
+    description: "API key from the Blaxel console"
+    public_prefix: "bl_"
+# The third host is where Blaxel's build upload (`?upload=true`) sends a presigned PUT; this version
+# never calls it, and the image-build version will.
+api_domains:
+  - api.blaxel.ai
+  - .bl.run
+  - controlplane-prod-build-sources-us-east-2-fec15f.s3.us-east-2.amazonaws.com
