@@ -22,7 +22,7 @@ folder has already). A provider keeps ownership of its adapter and may use it an
 ## Run it
 
 Every command below runs from this folder (`providers/example/` of a clone of
-[sandbox-providers](https://github.com/boxrouter/sandbox-providers)). Example Cloud needs a local
+[sandbox-provider-adapters](https://github.com/boxrouter/sandbox-provider-adapters)). Example Cloud needs a local
 Docker daemon:
 
 ```console

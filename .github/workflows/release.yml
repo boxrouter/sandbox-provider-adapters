@@ -36,7 +36,7 @@ jobs:
           app-id: ${{ vars.PROVIDERS_RELEASE_APP_ID }}
           private-key: ${{ secrets.PROVIDERS_RELEASE_APP_PRIVATE_KEY }}
           owner: boxrouter
-          repositories: sandbox-providers
+          repositories: sandbox-provider-adapters
           permission-contents: write
       - name: Dispatch App token (Cloud workflows only)
         id: dispatch_app
@@ -70,4 +70,4 @@ jobs:
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
           gh workflow run repin.yml --repo boxrouter/cloud --ref main \
-            -f repo=boxrouter/sandbox-providers -f tag="$TAG"
+            -f repo=boxrouter/sandbox-provider-adapters -f tag="$TAG"

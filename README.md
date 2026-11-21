@@ -17,7 +17,7 @@ To add or update a provider, read [CONTRIBUTING.md](CONTRIBUTING.md). Maintainer
 ## Repository layout
 
 ```text
-sandbox-providers/
+sandbox-provider-adapters/
 ├── README.md
 ├── CONTRIBUTING.md
 ├── REVIEW.md
