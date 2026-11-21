@@ -10,4 +10,4 @@ Provider folder and what changes:
 - [ ] Every host the adapter calls is in `api_domains`.
 - [ ] No credential, token or account identifier is in the diff, a test or a log.
 - [ ] Every commit has a `Signed-off-by:` line.
-- [ ] I have read [Licence Of Your Contribution](https://github.com/boxrouter/sandbox-providers/blob/main/CONTRIBUTING.md#licence-of-your-contribution) and agree to it.
+- [ ] I have read [Licence Of Your Contribution](https://github.com/boxrouter/sandbox-provider-adapters/blob/main/CONTRIBUTING.md#licence-of-your-contribution) and agree to it.
