@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.0
+
+- Vendor the SPS 0.5.33 wheel (the current release); `uv.lock` follows. Refresh the adapter, `fake_cloud/`, tests and `scripts/smoke.py` from the SPS template: snapshots, directory operations, a terminal, a final cost with calculated lines priced from discovery, and the `websockets` dependency. READMEs say how to run the tester (`--credential endpoint=…`, the `sps1.` token for a served adapter).
+- The two files that stay under Apache-2.0 are unchanged from the template (see NOTICE).
+
 ## 0.1.3
 
 - Licence is PolyForm Shield 1.0.0 (`LicenseRef-PolyForm-Shield-1.0.0` in the wheel metadata); source headers say `PolyForm-Shield-1.0.0`. Two files copied unchanged from the SPS template keep their template licence (see NOTICE).

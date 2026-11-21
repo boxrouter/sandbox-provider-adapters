@@ -7,7 +7,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sps-provider-example"
-version = "0.1.3"
+version = "0.2.0"
 description = "The template provider adapter: a 1.0 Provider over Example Cloud"
 readme = "README.md"
 license = "LicenseRef-PolyForm-Shield-1.0.0"
@@ -15,6 +15,7 @@ requires-python = ">=3.11"
 dependencies = [
     "sandbox-provider-spec",
     "httpx==0.28.1",
+    "websockets==16.1.1",
 ]
 
 [project.entry-points."sandbox_provider_spec.providers"]
@@ -31,7 +32,7 @@ tools = [
 ]
 
 [tool.uv.sources]
-sandbox-provider-spec = { path = "vendor/sandbox_provider_spec-0.3.206-py3-none-any.whl" }
+sandbox-provider-spec = { path = "vendor/sandbox_provider_spec-0.5.33-py3-none-any.whl" }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/sps_provider_example"]

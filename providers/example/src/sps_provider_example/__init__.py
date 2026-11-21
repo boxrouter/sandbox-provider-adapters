@@ -1,34 +1,44 @@
 # SPDX-FileCopyrightText: BoxRouter, Inc.
 # SPDX-License-Identifier: PolyForm-Shield-1.0.0
-"""The template adapter: a 1.0 `Provider` over Example Cloud (`template/fake_cloud/`).
+"""The template adapter: a 1.0 `Provider` over Example Cloud (`fake_cloud/`).
 
 Example Cloud's API is deliberately not shaped like the standard, so each method shows a real
 translation; a comment above it names the Example Cloud call it maps. Example Cloud returns no
 labels or sizes on a machine, so the adapter keeps them in a JSON file inside the machine
 (`META_PATH`); a provider whose API stores machine metadata would read that instead. Example
 Cloud lists only running machines, so a replayed create is found only while the first machine runs.
+
+Snapshots map to Example Cloud's images: `docker commit` of a machine, listed, described and
+deleted through `/images`, with usage records of each image's size. A restore is a machine created
+from an image. An image's labels are kept as a JSON tag, because image tags cannot hold every key.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterable, AsyncIterator, Mapping
+from collections.abc import AsyncIterable, AsyncIterator, Callable, Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
 import httpx
+import websockets.asyncio.client
+import websockets.exceptions
 from sandbox_provider_spec.v1 import (
     ERROR_TABLE,
     Cost,
     CostLine,
     CreateRequest,
     DestroyResult,
+    DirectoryEntry,
+    DirectoryPage,
     Discovery,
+    EntryType,
     FileInfo,
     FileStream,
     OutputChunk,
     OutputPage,
+    PathInfo,
     Process,
     ProcessStartRequest,
     Provider,
@@ -37,12 +47,19 @@ from sandbox_provider_spec.v1 import (
     Sandbox,
     SandboxPage,
     Size,
+    Snapshot,
+    SnapshotDeleteResult,
+    SnapshotPage,
+    SnapshotRequest,
     SpsError,
+    Terminal,
+    TerminalRequest,
 )
 
-from sps_provider_example.create_spec import fingerprint, plan_create
+from sps_provider_example.create_spec import fingerprint, plan_create, snapshot_fingerprint
 from sps_provider_example.facts import (
     CLASS,
+    HOURS_PER_MONTH,
     IMAGE,
     LIMITS,
     LIST_LIMIT,
@@ -51,25 +68,95 @@ from sps_provider_example.facts import (
     META_PATH,
     PRICE_CPU,
     PRICE_MEM,
+    PRICE_SNAPSHOT,
     REGION,
     TAG_BODY,
     TAG_IDEM,
     TAG_LABEL,
+    TAG_LABELS,
     build_discovery,
 )
+
+_ENTRY_TYPES: dict[str, EntryType] = {
+    "file": "file",
+    "dir": "directory",
+    "link": "symlink",
+    "other": "other",
+}
 
 
 def _stamp(text: str) -> datetime:
     return datetime.fromisoformat(text)
 
 
+# Opens the WebSocket of an Example Cloud terminal; a test replaces it with a stand-in.
+Connect = Callable[[str, Mapping[str, str]], Any]
+
+
+async def _connect(url: str, headers: Mapping[str, str]) -> Any:
+    try:
+        return await websockets.asyncio.client.connect(
+            url, additional_headers=dict(headers), proxy=None, compression=None, max_size=1 << 20
+        )
+    except (websockets.exceptions.WebSocketException, OSError):
+        raise SpsError("unavailable", "Example Cloud's terminal is unreachable") from None
+
+
+class ExampleTerminal(Terminal):
+    """A terminal on Example Cloud's own WebSocket: its binary frames are the terminal's bytes
+    in both directions, and a text frame `{"exit": <code or null>}` says that the program is
+    over. A resize is a separate HTTP call, so the adapter keeps the HTTP client's route."""
+
+    def __init__(self, socket: Any, resize: Callable[[int, int], Any]) -> None:
+        self._socket = socket
+        self._resize = resize
+        self.exit_code: int | None = None
+
+    async def write(self, data: bytes) -> None:
+        try:
+            await self._socket.send(data)
+        except websockets.exceptions.ConnectionClosed:
+            raise SpsError("unavailable", "The terminal connection is closed") from None
+
+    async def resize(self, columns: int, rows: int) -> None:
+        await self._resize(columns, rows)
+
+    async def output(self) -> AsyncIterator[bytes]:
+        try:
+            async for frame in self._socket:
+                if isinstance(frame, bytes):
+                    yield frame
+                    continue
+                code = json.loads(frame).get("exit")
+                self.exit_code = code if isinstance(code, int) else None
+                return
+        except websockets.exceptions.ConnectionClosedOK:
+            return
+        except websockets.exceptions.ConnectionClosedError:
+            raise SpsError(
+                "provider_error", "The terminal connection failed", outcome="unknown"
+            ) from None
+
+    async def close(self) -> None:
+        # Closing the connection ends the program: Example Cloud hangs up on its process group.
+        try:
+            await self._socket.close()
+        except (websockets.exceptions.WebSocketException, OSError):
+            pass
+
+
 class ExampleProvider(Provider):
     """A 1.0 provider over Example Cloud's machine API."""
 
     def __init__(
-        self, credentials: Mapping[str, str], *, transport: httpx.AsyncBaseTransport | None = None
+        self,
+        credentials: Mapping[str, str],
+        *,
+        transport: httpx.AsyncBaseTransport | None = None,
+        connect: Connect = _connect,
     ) -> None:
         super().__init__(credentials)
+        self._connect = connect
         endpoint = self.credentials.get("endpoint", "https://api.example.test")
         self._http = httpx.AsyncClient(
             base_url=endpoint.rstrip("/"),
@@ -161,14 +248,20 @@ class ExampleProvider(Provider):
     async def discovery(self) -> Discovery:
         # No Example Cloud call returns these facts; listing machines proves the key.
         await self._machines(limit=1)
-        return build_discovery()
+        return build_discovery(provider_id=self.provider_id, provider_name=self.name)
 
     async def create(self, request: CreateRequest, *, idempotency_key: str) -> Sandbox:
         # GET /machines?tag=sps.idem:<key> finds a replay, then POST /machines.
         # A provider with unique names would instead send the key as the name at
         # no extra call: `POST /machines {name: idempotency_key, ...}` and map
         # the API's name-conflict error to the replay path.
-        spec, meta = plan_create(request)
+        # A restore is the same call with `image_id`: the machine starts from the saved files.
+        snapshot_size = None
+        if request.snapshot is not None:
+            if request.image is not None:
+                raise SpsError("invalid_request", "A restore names no image")
+            snapshot_size = (await self.snapshot_get(request.snapshot)).size
+        spec, meta = plan_create(request, snapshot_size)
         spec["tags"].update({TAG_IDEM: idempotency_key, TAG_BODY: fingerprint(request)})
         page = await self._machines((TAG_IDEM, idempotency_key), limit=1)
         if page["machines"]:
@@ -223,10 +316,9 @@ class ExampleProvider(Provider):
         return SandboxPage(sandboxes=boxes, next_cursor=page["next_page_token"])
 
     async def destroy(self, sandbox_id: str) -> DestroyResult:
-        # DELETE /machines/{id}; usage records outlive the machine, so cost stays
-        # readable and the result carries no final cost.
+        # DELETE /machines/{id}; usage records outlive the machine, so cost stays readable.
         await self._req("DELETE", f"/machines/{sandbox_id}")
-        return DestroyResult(sandbox_id=sandbox_id, state="destroyed", cost=None)
+        return DestroyResult(sandbox_id=sandbox_id, state="destroyed")
 
     async def run(self, sandbox_id: str, request: RunRequest) -> RunResult:
         # POST /machines/{id}/exec. A missing workdir is a generic failure there,
@@ -300,6 +392,47 @@ class ExampleProvider(Provider):
         )
         return FileInfo(path=resp.json()["path"], size=resp.json()["size"])
 
+    # The four directory operations (no gate). Example Cloud's own calls: GET fs?op=ls (a page
+    # that carries the last name as `after` when more follow), GET fs/stat, POST fs/mkdir and
+    # POST fs/rm, each run by Example Cloud inside the machine. Its kinds are file, dir, link
+    # and other.
+
+    async def files_list(
+        self, sandbox_id: str, path: str, *, cursor: str | None = None, limit: int = 100
+    ) -> DirectoryPage:
+        if not 1 <= limit <= LIST_LIMIT:
+            raise SpsError("invalid_request", f"limit must be 1 to {LIST_LIMIT}")
+        params = {"op": "ls", "path": path, "max": limit}
+        if cursor:
+            params["after"] = cursor
+        page = await self._json("GET", f"/machines/{sandbox_id}/fs", params=params)
+        entries = tuple(
+            DirectoryEntry(item["name"], _ENTRY_TYPES[item["kind"]], item["bytes"])
+            for item in page["items"]
+        )
+        return DirectoryPage(entries=entries, next_cursor=page["after"])
+
+    async def files_mkdir(self, sandbox_id: str, path: str, *, parents: bool = False) -> None:
+        await self._json(
+            "POST",
+            f"/machines/{sandbox_id}/fs/mkdir",
+            json={"path": path, "parents": parents},
+        )
+
+    async def files_remove(self, sandbox_id: str, path: str, *, recursive: bool = False) -> None:
+        # A removal that fails part way is a provider fault, which `_check` marks `unknown`.
+        await self._json(
+            "POST",
+            f"/machines/{sandbox_id}/fs/rm",
+            json={"path": path, "recursive": recursive},
+        )
+
+    async def files_exists(self, sandbox_id: str, path: str) -> PathInfo:
+        found = await self._json("GET", f"/machines/{sandbox_id}/fs/stat", params={"path": path})
+        if not found["found"]:
+            return PathInfo(exists=False, type=None)
+        return PathInfo(exists=True, type=_ENTRY_TYPES[found["kind"]])
+
     async def process_start(self, sandbox_id: str, request: ProcessStartRequest) -> Process:
         # POST /machines/{id}/jobs; a job is a detached exec with a retained log.
         if request.stdin:
@@ -350,14 +483,17 @@ class ExampleProvider(Provider):
     async def cost(self, sandbox_id: str) -> Cost:
         # GET /machines/{id}/usage; the price list in discovery prices the record.
         usage = await self._json("GET", f"/machines/{sandbox_id}/usage")
+        # `as_of` is when Example Cloud read its record, by its own clock; a running machine
+        # counts up to it, and the line stays open (`end` null) until the machine ends.
+        as_of = _stamp(usage["as_of"])
         start = _stamp(usage["started"])
-        end = _stamp(usage["ended"]) if usage["ended"] else datetime.now(UTC)
-        seconds = Decimal(str(max((end - start).total_seconds(), 0.0)))
+        end = _stamp(usage["ended"]) if usage["ended"] else None
+        seconds = Decimal(str(max(((end or as_of) - start).total_seconds(), 0.0)))
         cpu_q = Decimal(str(usage["cpu"])) * seconds
         mem_q = Decimal(str(usage["memory_mb"])) / 1024 * seconds
         lines = (
-            CostLine("cpu", cpu_q, "vcpu_second", cpu_q * PRICE_CPU, start, end),
-            CostLine("memory", mem_q, "gib_second", mem_q * PRICE_MEM, start, end),
+            CostLine("cpu", cpu_q * PRICE_CPU, cpu_q, "vcpu_second", start, end),
+            CostLine("memory", mem_q * PRICE_MEM, mem_q, "gib_second", start, end),
         )
         return Cost(
             sandbox_id=sandbox_id,
@@ -365,8 +501,152 @@ class ExampleProvider(Provider):
             total_usd=sum(line.amount_usd for line in lines),
             source="calculated",
             lines=lines,
-            as_of=datetime.now(UTC),
+            as_of=as_of,
         )
+
+    # -- snapshots ---------------------------------------------------------------
+
+    @staticmethod
+    def _to_snapshot(image: dict[str, Any]) -> Snapshot:
+        tags = image["tags"]
+        return Snapshot(
+            id=image["image_id"],
+            sandbox_id=image["machine_id"],
+            sandbox_class=CLASS,
+            state="ready",
+            keeps="files_only",
+            size=Size(cpu=image["cpu"], memory_mib=image["memory_mb"]),
+            stored_bytes=image["size_bytes"],
+            labels=json.loads(tags.get(TAG_LABELS, "{}")),
+            created_at=_stamp(image["created"]),
+            expires_at=None,
+        )
+
+    async def snapshot_create(
+        self, sandbox_id: str, request: SnapshotRequest, *, idempotency_key: str
+    ) -> Snapshot:
+        # GET /images?tag=sps.idem:<key> finds a replay, then POST /machines/{id}/images, which
+        # is `docker commit` and returns a ready image. `pause: false` leaves the machine
+        # running, which is the `continues` that discovery declares.
+        if request.keeps not in (None, "files_only"):
+            raise SpsError("unsupported", "Example Cloud keeps files only")
+        tags = {
+            TAG_IDEM: idempotency_key,
+            TAG_BODY: snapshot_fingerprint(sandbox_id, request),
+            TAG_LABELS: json.dumps(dict(request.labels), sort_keys=True),
+            **{f"{TAG_LABEL}{k}": v for k, v in request.labels.items() if "/" not in k},
+        }
+        found = await self._json(
+            "GET", "/images", params=[("tag", f"{TAG_IDEM}:{idempotency_key}")]
+        )
+        if found["images"]:
+            image = found["images"][0]
+            if image["tags"].get(TAG_BODY) != tags[TAG_BODY]:
+                raise SpsError("conflict", "Idempotency-Key was used with a different body")
+            return self._to_snapshot(image)
+        image = await self._json(
+            "POST",
+            f"/machines/{sandbox_id}/images",
+            json={"tags": tags, "pause": False},
+            timeout=httpx.Timeout(600.0, connect=10.0),
+        )
+        return self._to_snapshot(image)
+
+    async def snapshot_get(self, snapshot_id: str) -> Snapshot:
+        # GET /images/{id}; a deleted image is unknown there.
+        return self._to_snapshot(await self._json("GET", f"/images/{snapshot_id}"))
+
+    async def snapshot_list(
+        self,
+        *,
+        labels: Mapping[str, str] | None = None,
+        sandbox_id: str | None = None,
+        cursor: str | None = None,
+        limit: int = 100,
+    ) -> SnapshotPage:
+        # GET /images?tag=l.<k>:<v>&machine=&page_token=; "/" keys are checked locally.
+        query: list[tuple[str, str]] = []
+        local: dict[str, str] = {}
+        for key, value in dict(labels or {}).items():
+            if "/" in key:
+                local[key] = value
+            else:
+                query.append(("tag", f"{TAG_LABEL}{key}:{value}"))
+        if sandbox_id is not None:
+            query.append(("machine", sandbox_id))
+        query.append(("limit", str(min(limit, LIST_LIMIT))))
+        if cursor:
+            query.append(("page_token", cursor))
+        page = await self._json("GET", "/images", params=query)
+        found = [self._to_snapshot(item) for item in page["images"]]
+        if local:
+            found = [s for s in found if all(s.labels.get(k) == v for k, v in local.items())]
+        return SnapshotPage(snapshots=found, next_cursor=page["next_page_token"])
+
+    async def snapshot_delete(self, snapshot_id: str) -> SnapshotDeleteResult:
+        # DELETE /images/{id}; a repeat succeeds and an unknown id is not_found there.
+        await self._req("DELETE", f"/images/{snapshot_id}")
+        return SnapshotDeleteResult(snapshot_id=snapshot_id, state="deleted")
+
+    async def snapshot_cost(self, snapshot_id: str) -> Cost:
+        # GET /images/{id}/usage: the image's stored size over time, which outlives the image.
+        usage = await self._json("GET", f"/images/{snapshot_id}/usage")
+        as_of = _stamp(usage["as_of"])  # Example Cloud's clock, not the adapter's
+        lines = []
+        for record in usage["records"]:
+            start = _stamp(record["from"])
+            end = _stamp(record["until"]) if record["until"] else as_of
+            seconds = Decimal(str(max((end - start).total_seconds(), 0.0)))
+            quantity = (
+                Decimal(record["size_bytes"])
+                / Decimal(1 << 30)
+                * seconds
+                / (3600 * HOURS_PER_MONTH)
+            )
+            lines.append(
+                CostLine("snapshot", quantity * PRICE_SNAPSHOT, quantity, "gib_month", start, end)
+            )
+        return Cost(
+            sandbox_id=usage["machine_id"],
+            status="final" if all(r["until"] for r in usage["records"]) else "accruing",
+            total_usd=sum((line.amount_usd for line in lines), start=Decimal(0)),
+            source="calculated",
+            lines=tuple(lines),
+            as_of=as_of,
+            snapshot_id=snapshot_id,
+        )
+
+    async def terminal_open(self, sandbox_id: str, request: TerminalRequest) -> Terminal:
+        # POST /machines/{id}/tty starts the program on a pseudo-terminal and returns the path
+        # of its WebSocket; the WebSocket is then the terminal. A missing working directory is
+        # a generic failure there, so a cwd is probed first, as `run` does.
+        if request.cwd is not None:
+            probe = [
+                "python3",
+                "-c",
+                "import os,sys;sys.exit(not os.path.isdir(sys.argv[1]))",
+                request.cwd,
+            ]
+            check = {"cmd": probe, "timeout_s": 30}
+            if (await self._json("POST", f"/machines/{sandbox_id}/exec", json=check))["code"]:
+                raise SpsError("not_found", f"No such directory: {request.cwd}")
+        body: dict[str, Any] = {
+            "cmd": None if request.argv is None else list(request.argv),
+            "env": dict(request.env),
+            "cols": request.columns,
+            "rows": request.rows,
+            "term": request.term,
+        }
+        if request.cwd is not None:
+            body["dir"] = request.cwd
+        tty = await self._json("POST", f"/machines/{sandbox_id}/tty", json=body)
+        url = str(self._http.base_url).rstrip("/").replace("http", "ws", 1) + tty["ws"]
+        socket = await self._connect(url, {"X-Api-Key": self.credentials["api_key"]})
+
+        async def resize(columns: int, rows: int) -> None:
+            await self._req("POST", f"{tty['ws']}/resize", json={"cols": columns, "rows": rows})
+
+        return ExampleTerminal(socket, resize)
 
     async def aclose(self) -> None:
         await self._http.aclose()
