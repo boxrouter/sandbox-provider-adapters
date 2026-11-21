@@ -1,2 +1,3 @@
 global: [sandbox-provider-spec, httpx]
-providers: {}
+providers:
+  example: [websockets]
