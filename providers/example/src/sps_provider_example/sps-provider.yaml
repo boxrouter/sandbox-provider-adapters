@@ -12,4 +12,4 @@ credential_fields:
     required: false
     default: "https://api.example.test"
     description: "Example Cloud base URL"
-api_domains: [api.example.test, .example.test]
+api_domains: [api.example.test]

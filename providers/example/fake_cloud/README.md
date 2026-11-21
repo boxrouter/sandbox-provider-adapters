@@ -51,10 +51,23 @@ and a missing or empty one gets `401`. `GET /healthz` is unauthenticated.
 | `GET /machines?tag=<k>:<v>&page_token=&limit=` | → `{machines: [...], next_page_token}`; lists only running machines, `tag` may repeat |
 | `DELETE /machines/{id}` | → `{status}`; repeating on an ended machine still succeeds |
 | `POST /machines/{id}/exec` | `{cmd: [...], dir, env, timeout_s}` → `{code, out, err, killed}`; `killed` means the timeout ended the command |
-| `GET` and `PUT /machines/{id}/fs?path=` | raw bytes in both directions, streamed; `PUT` needs `Content-Length` and the parent directory must exist |
+| `GET` and `PUT /machines/{id}/fs?path=` | raw bytes in both directions, streamed; `PUT` needs `Content-Length`; a missing parent directory is `404` and nothing is created |
+| `GET /machines/{id}/fs?op=ls&path=&after=&max=` | → `{items: [{name, kind, bytes}], after}`; `kind` is `file`, `dir`, `link` or `other`, `bytes` is the entry's own size, items are sorted by name, `max` is 1 to 1000 (default 100), `after` is an opaque token that continues the listing (null at the end) |
+| `GET /machines/{id}/fs/stat?path=` | → `{found, kind}`; a final link is not followed |
+| `POST /machines/{id}/fs/mkdir` | `{path, parents}` → `{}`; `409` when a non-directory is in the way, `404` for a missing parent without `parents` |
+| `POST /machines/{id}/fs/rm` | `{path, recursive}` → `{}`; a link is removed, never followed; `409` for a non-empty directory without `recursive`; `400` for `/` |
 | `POST /machines/{id}/jobs` | `{cmd: [...], dir, env}` → `{job_id}`; a job keeps running after the call returns |
 | `GET /machines/{id}/jobs/{job_id}/log?offset=&wait=` | → `{out, err, offset, done, code}`; `offset` is `<stdout_pos>.<stderr_pos>`, `wait` long-polls up to 60 s |
-| `GET /machines/{id}/usage` | → `{cpu, memory_mb, started, ended}`; `ended` is null while the machine runs |
+| `POST /machines/{id}/tty` | `{cmd: [...] or null, dir, env, cols, rows, term}` → `{tty_id, ws}`; starts the program (`bash -l` when `cmd` is null) on a pseudo-terminal, and `ws` is the path of its WebSocket |
+| `WebSocket /machines/{id}/tty/{tty_id}` | binary frames carry the terminal's bytes in both directions; when the program ends, one text frame `{"exit": <code or null>}` and a close. It connects once, needs `X-Api-Key`, and closing it hangs up on the program's process group (a kill follows 5 seconds later) |
+| `POST /machines/{id}/tty/{tty_id}/resize` | `{cols, rows}` → `{}` |
+| `GET /machines/{id}/usage` | → `{cpu, memory_mb, started, ended, as_of}`; `ended` is null while the machine runs and then counts up to `as_of`, the time of the read |
+| `POST /machines/{id}/images` | `{tags, pause}` → `{image_id, machine_id, status, created, cpu, memory_mb, size_bytes, tags}`; saves the machine's files as an image, ready when the call returns; `pause` (default true) freezes the machine meanwhile, `false` lets it run |
+| `POST /machines` with `image_id` | as above, starting from an image's files at its `cpu` and `memory_mb` (unless the call names its own); the new machine has its own `env` and `tags` |
+| `GET /images?tag=<k>:<v>&machine=&page_token=&limit=` | → `{images: [...], next_page_token}`; `tag` may repeat; lists images that are not deleted |
+| `GET /images/{id}` | → the same image object |
+| `DELETE /images/{id}` | → `{status: "deleted"}`; repeating still succeeds, an unknown id is `404`; a deleted image can no longer start a machine |
+| `GET /images/{id}/usage` | → `{machine_id, records: [{size_bytes, from, until}], as_of}`; `until` is null while the image is stored; records outlive the image |
 
 Errors look like `{"error": {"code": "not_found", "message": "..."}}` with a
 matching HTTP status.
@@ -69,8 +82,17 @@ matching HTTP status.
 - `tags` become container labels `example.tag.<k>`, alongside
   `example.owner`, `example.machine_id`, `example.created` and
   `example.expires`.
-- Usage records (`usage.db` in the state directory) are kept for 30 days
+- A terminal is a Docker exec with a TTY. A terminal that nobody connects to within a minute
+  is ended, and the machine's lifetime ends every terminal on it.
+- Usage records (`usage.db` in the state directory) are kept for 90 days
   after a machine ends and are pruned lazily.
+- An image is `docker commit` of the machine's container, tagged
+  `example-cloud-image:<image_id>` and labelled `example.snapshot=1` and
+  `example.owner`, so `docker images --filter label=example.snapshot=1` lists
+  what Example Cloud holds. A machine started from an image gets its own `env`
+  and `tags`: the saved machine's are blanked, because Docker keeps them in the
+  image. Deleting an image removes its Docker image as soon as no machine
+  uses it; a machine that was started from it keeps running until it ends.
 
 ## Limits of the fake
 
