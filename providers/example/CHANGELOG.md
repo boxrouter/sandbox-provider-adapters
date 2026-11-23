@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.2
+
+- Vendor the SPS 0.5.86 wheel (the current release; its own tests include the Sail launch-state fix and the provider assets since 0.5.62); `uv.lock` follows. The Blaxel folder's tests run against this wheel.
+
 ## 0.3.1
 
 - Vendor the SPS 0.5.62 wheel (the current release; adds `public_prefix` and the other optional parts since 0.5.57); `uv.lock` follows. The README now carries the template's sentence on `lifetime_enforced_by` and `ordered_sessions`. The adapter, fake backend, tests and smoke script are unchanged from the SPS template.
