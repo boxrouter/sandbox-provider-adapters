@@ -2,19 +2,25 @@
 # SPDX-License-Identifier: PolyForm-Shield-1.0.0
 """The four directory operations, as the commands that the spec defines them by.
 
-Blaxel's own file API cannot give these results: its `HEAD` follows a link and answers 200 for a
-missing path, and its listing has no size for a directory. Section 18 of the contract says each
-result is the one that the equivalent commands give, so each operation runs one short program in
-the sandbox as the default user: a POSIX script (`mkdir`, `rm`, `test`) or, for the listing, a few
-lines of Python. A program ends with a code of its own when the path is missing (40) or is not a
+Section 18 of the contract says each result is the one that the equivalent commands give. Blaxel's
+own file API cannot give `mkdir`, `rm` and `exists` (its `HEAD` follows a link and answers 200 for a
+missing path), so each runs one short POSIX script (`mkdir`, `rm`, `test`) in the sandbox as the
+default user. A script ends with a code of its own when the path is missing (40) or is not a
 directory (41); any other failure is told by the command's message, which the scripts make English
 with `LC_ALL=C`.
+
+The listing is Blaxel's own `GET /filesystem/{dir}` (one exchange): it names every entry and gives
+a file's size and its mode as an octal Go `FileMode` string, but gives a directory no size.
+`listing` reads the entry type from the mode's type bits and `DIR_SIZES` asks `stat` for the size
+of the directories on the page being returned, in one process, only when that page has a
+directory.
 """
 
 from __future__ import annotations
 
 import base64
 import binascii
+import re
 
 from sandbox_provider_spec.v1 import DirectoryEntry, DirectoryPage, EntryType, RunResult, SpsError
 
@@ -22,32 +28,8 @@ MISSING = 40
 NOT_A_DIRECTORY = 41
 
 _LC = "# sps-directory\nLC_ALL=C; export LC_ALL\n"
-# The listing is a Python program (the base image has python3, and its BusyBox `find` has no
-# `-printf`): one `lstat` per entry, one NUL-ended `type<TAB>size<TAB>name` record each.
-LIST = """# sps-directory
-import os, stat, sys
-path = sys.argv[1]
-if not os.path.lexists(path):
-    sys.exit(40)
-if not os.path.isdir(path):
-    sys.exit(41)
-out = sys.stdout.buffer
-try:
-    for entry in os.scandir(path):
-        info = entry.stat(follow_symlinks=False)
-        mode = info.st_mode
-        kind = "o"
-        if stat.S_ISDIR(mode):
-            kind = "d"
-        elif stat.S_ISREG(mode):
-            kind = "f"
-        elif stat.S_ISLNK(mode):
-            kind = "l"
-        out.write(f"{kind}\\t{info.st_size}\\t".encode() + os.fsencode(entry.name) + b"\\0")
-except PermissionError:
-    sys.stderr.write("Permission denied")
-    sys.exit(1)
-"""
+# The size of each directory on a page, in the order given: `stat` does not follow a link.
+DIR_SIZES = ["stat", "-c", "%s", "--"]
 # `-L` and `-d` follow a link, so the link is asked first: a link is a link, even a dangling one.
 EXISTS = (
     _LC
@@ -72,8 +54,6 @@ _TYPES: dict[str, EntryType] = {"f": "file", "d": "directory", "l": "symlink"}
 def argv(script: str, path: str, flag: bool = False) -> list[str]:
     """The command line of a script; a relative path is anchored so that it is never an option."""
     where = path if path.startswith("/") else f"./{path}"
-    if script is LIST:
-        return ["python3", "-c", script, where]
     return ["sh", "-c", script, "sh", where, "1" if flag else "0"]
 
 
@@ -106,12 +86,49 @@ def failure(result: RunResult, what: str) -> SpsError:
     return SpsError("provider_error", f"{what} failed", outcome="unknown")
 
 
-def parse_listing(stdout: str) -> list[DirectoryEntry]:
-    """The entries of `LIST`'s output (`type<TAB>size<TAB>name`, each ended by NUL), by name bytes."""
+# Go's `FileMode` printed in octal, which is what `permissions` carries: the type lives in the
+# bits above the nine permission bits (a link "1000000777" is symlink 1<<27 | 0777, a pipe
+# "200000644" is pipe 1<<25 | 0644). Setuid, setgid and sticky are mode bits, not a type.
+_MODE_DIR = 1 << 31
+_MODE_SYMLINK = 1 << 27
+# device, named pipe, socket, char device, irregular: the modes of a `files` entry that is not a
+# regular file or a link.
+_MODE_OTHER = (1 << 26) | (1 << 25) | (1 << 24) | (1 << 21) | (1 << 19)
+_OCTAL = re.compile(r"[0-7]{1,16}")
+
+
+def _kind(mode: object) -> EntryType | None:
+    """The type in a `permissions` octal (`"644"` file, `"1000000777"` link, `"200000644"` pipe);
+    None when the value does not read as a Go `FileMode`."""
+    if not isinstance(mode, str) or not _OCTAL.fullmatch(mode):
+        return None
+    bits = int(mode, 8)
+    if bits & _MODE_DIR:
+        return "directory"
+    if bits & _MODE_SYMLINK:
+        return "symlink"
+    return "other" if bits & _MODE_OTHER else "file"
+
+
+def listing(body: object) -> list[DirectoryEntry]:
+    """The entries of Blaxel's directory reply, by name bytes. A directory's size is 0 here: the
+    caller asks for the directories it returns. An entry without a name, a size or a readable
+    mode is a `provider_error`: the listing cannot be trusted."""
+    if not isinstance(body, dict) or not ("files" in body or "subdirectories" in body):
+        raise SpsError("invalid_request", "the listing: not a directory")
     found: list[DirectoryEntry] = []
-    for record in filter(None, stdout.split("\0")):
-        code, size, name = record.split("\t", 2)
-        found.append(DirectoryEntry(name=name, type=entry_type(code), size=int(size)))
+    for item in body.get("files") or []:
+        name = item.get("name") if isinstance(item, dict) else None
+        size = item.get("size") if isinstance(item, dict) else None
+        kind = _kind(item.get("permissions") if isinstance(item, dict) else None)
+        if not isinstance(name, str) or not name or not isinstance(size, int) or kind is None:
+            raise SpsError("provider_error", "the listing: an entry did not read")
+        found.append(DirectoryEntry(name=name, type=kind, size=size))
+    for item in body.get("subdirectories") or []:
+        name = item.get("name") if isinstance(item, dict) else None
+        if not isinstance(name, str) or not name:
+            raise SpsError("provider_error", "the listing: an entry did not read")
+        found.append(DirectoryEntry(name=name, type="directory", size=0))
     return sorted(found, key=lambda e: e.name.encode())
 
 

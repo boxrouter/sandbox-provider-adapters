@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import quote
 from uuid import uuid4
 
-from sandbox_provider_spec.v1 import PreviewLink, SpsError
+from sandbox_provider_spec.v1 import PreviewLink, SpsError, waiting
 
 from sps_provider_blaxel import wire
 from sps_provider_blaxel.facts import RESERVED_PORT
@@ -136,5 +136,5 @@ async def revoke(p: BlaxelProvider, sandbox_id: str, preview_id: str) -> None:
         found = await p.ctl_raw("GET", where)
         if found.status_code == 404:
             return
-        await asyncio.sleep(0.2)
+        await waiting.pause(0.2)
     raise SpsError("timeout", "Blaxel did not finish deleting the preview", outcome="unknown")

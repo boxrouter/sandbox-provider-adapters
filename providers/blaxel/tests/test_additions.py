@@ -11,6 +11,7 @@ import getpass
 import io
 import json
 import subprocess
+import sys
 import tarfile
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -30,6 +31,7 @@ from sandbox_provider_spec.v1 import (
     SecretHeader,
     SpsError,
 )
+from sandbox_provider_spec.v1.timing import in_lookup
 from sandbox_provider_spec.v1.types import ImageConfig, RegistryCredentials
 
 from sps_provider_blaxel import BlaxelProvider, dockerfile, images
@@ -53,6 +55,7 @@ class Fake:
         self.previews: dict[str, dict[str, Any]] = {}
         self.uploads: list[bytes] = []
         self.requests: list[httpx.Request] = []
+        self.marked: list[bool] = []  # per request, in order: was it inside `lookup()`
         self.metrics: list[dict[str, Any]] = []
         self.build_log: str | None = None  # set: a build fails with this log
 
@@ -65,6 +68,7 @@ class Fake:
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
+        self.marked.append(in_lookup())
         host = request.url.host
         if host == "api.blaxel.ai":
             return self.control(request)
@@ -406,14 +410,77 @@ def test_account_cost_adds_every_resource_inside_the_window(fake: Fake) -> None:
         assert error.value.code == "invalid_request"
 
 
-def test_cost_of_a_sandbox_whose_record_is_gone_starts_at_the_hint(fake: Fake) -> None:
-    fake.metrics = _rows(("2026-11-21T01:00:00Z", "0.5"), name="b" * 32)
-    box = fake.provider()
+GONE = "b" * 32
+CREATED = datetime(2026, 11, 21, 1, 20, tzinfo=UTC)
+
+
+def _read_gone(fake: Fake, monkeypatch: pytest.MonkeyPatch, date: str) -> Any:
+    """`cost` of a sandbox whose record Blaxel has dropped, read when Blaxel's clock says `date`."""
+    monkeypatch.setattr(sys.modules[__name__], "DATE", date)
+    return run(fake.provider().cost(GONE, created_at=CREATED))
+
+
+def test_cost_of_a_sandbox_whose_record_is_gone_starts_at_the_hint(
+    fake: Fake, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Blaxel answers every hour of the window: 0 for the hours after the sandbox ran.
+    fake.metrics = _rows(("2026-11-21T01:00:00Z", "0.5"), ("2026-11-21T02:00:00Z", 0), name=GONE)
     with pytest.raises(SpsError) as error:
-        run(box.cost("b" * 32))
+        run(fake.provider().cost(GONE))  # no record and no hint: nowhere to look
     assert error.value.code == "not_found"
-    got = run(box.cost("b" * 32, created_at=datetime(2026, 11, 21, 1, 20, tzinfo=UTC)))
-    assert got.total_usd == Decimal("0.5") and got.status == "accruing"  # its end is not known
+    got = run(fake.provider().cost(GONE, created_at=CREATED))
+    assert got.total_usd == Decimal("0.5") and got.status == "final"
+    assert next(line.start for line in got.lines) == datetime(2026, 11, 21, 1, tzinfo=UTC)
+
+
+def test_a_dropped_record_is_final_at_once_and_not_found_without_a_cost(
+    fake: Fake, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Blaxel drops a deleted sandbox's record long after it published its buckets (live
+    2026-11-23: buckets 0 to 7 s after the destroy, records kept 16 to 50+ minutes), so a read
+    that finds the record gone finds every bucket the sandbox will have: the figure is final at
+    once, even inside the newest bucket's hour. With no bucket that has a cost, Blaxel holds
+    nothing for it."""
+    fake.metrics = _rows(
+        ("2026-11-21T01:00:00Z", "0.5"), ("2026-11-21T02:00:00Z", "0.25"), name=GONE
+    )
+    got = _read_gone(fake, monkeypatch, "Sat, 21 Nov 2026 02:30:00 GMT")
+    assert (got.total_usd, got.status) == (Decimal("0.75"), "final")
+    for metrics in ([], _rows(("2026-11-21T01:00:00Z", 0), name=GONE)):
+        fake.metrics = metrics
+        with pytest.raises(SpsError) as error:
+            _read_gone(fake, monkeypatch, "Sat, 21 Nov 2026 09:00:00 GMT")
+        assert error.value.code == "not_found"
+
+
+def _ended_record(fake: Fake, updated: str) -> None:
+    fake.sandboxes[GONE] = {
+        "status": "TERMINATED",
+        "metadata": {"name": GONE, "createdAt": "2026-11-21T01:20:00Z", "updatedAt": updated},
+    }
+
+
+def test_a_held_record_is_final_120_s_after_its_end(
+    fake: Fake, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ended_record(fake, "2026-11-21T02:00:00Z")  # ended exactly on the hour
+    fake.metrics = _rows(("2026-11-21T01:00:00Z", "0.5"), ("2026-11-21T02:00:00Z", 0), name=GONE)
+    got = _read_gone(fake, monkeypatch, "Sat, 21 Nov 2026 02:01:59 GMT")
+    assert (got.total_usd, got.status) == (Decimal("0.5"), "accruing")
+    got = _read_gone(fake, monkeypatch, "Sat, 21 Nov 2026 02:02:00 GMT")
+    assert (got.total_usd, got.status) == (Decimal("0.5"), "final")
+
+
+def test_a_held_record_without_a_cost_is_never_final(
+    fake: Fake, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ended_record(fake, "2026-11-21T01:30:00Z")
+    fake.metrics = _rows(("2026-11-21T01:00:00Z", 0), name=GONE)  # only Blaxel's 0 for the hour
+    got = _read_gone(fake, monkeypatch, "Sat, 21 Nov 2026 03:00:00 GMT")
+    assert (got.total_usd, got.status) == (Decimal(0), "accruing")
+    fake.metrics = []
+    got = _read_gone(fake, monkeypatch, "Sat, 21 Nov 2026 03:00:00 GMT")
+    assert (got.total_usd, got.status) == (None, "accruing")
 
 
 # -- previews --------------------------------------------------------------------------
@@ -531,6 +598,8 @@ def test_create_from_a_prepared_image_uses_its_tag_and_a_deleted_image_is_gone(f
         )
     )
     assert fake.sandboxes[sandbox.id]["spec"]["runtime"]["image"] == f"sandbox/{image.id}:tag1"
+    assert box._image_users[image.id] == "root"
+    assert box._users[sandbox.id] == "root"
     assert run(box.image_delete(image.id)).state == "deleted"
     assert run(box.image_delete(image.id)).state == "deleted"
     assert image.id not in fake.images
@@ -552,6 +621,33 @@ def test_create_from_a_prepared_image_uses_its_tag_and_a_deleted_image_is_gone(f
     with pytest.raises(SpsError) as error:
         run(box.image_delete("sps-img-" + "0" * 32))
     assert error.value.code == "not_found"
+
+
+def test_a_prepared_image_remembers_its_default_user(fake: Fake) -> None:
+    """The fs daemon is root whatever the image's USER: a sandbox's default exec user is
+    remembered so files endpoint calls run only when it is root."""
+    box = fake.provider()
+    for n, (source, want) in enumerate(
+        (
+            (OciSource(ALPINE, "sha256:" + "b" * 64, ImageConfig(user="alice")), "alice"),
+            (DockerfileSource(f"FROM {ALPINE}\nUSER bob\n"), "bob"),
+            (DockerfileSource(f"FROM {ALPINE}\n"), "root"),
+        )
+    ):
+        image = run(box.image_prepare(ImageRequest(source), idempotency_key=f"u{n}"))
+        assert box._image_users[image.id] == want
+        sandbox = run(
+            box.create(
+                CreateRequest(
+                    image={"provider": "blaxel", "provider_artifact": image.id},
+                    requirements={"custom_images": {}},
+                ),
+                idempotency_key=f"v{n}",
+            )
+        )
+        assert box._users[sandbox.id] == want
+        run(box.image_delete(image.id))
+        assert image.id not in box._image_users
 
 
 def test_a_failed_build_names_the_customers_failing_step(fake: Fake) -> None:

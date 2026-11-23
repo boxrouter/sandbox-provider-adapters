@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import posixpath
 import shlex
 from collections.abc import AsyncIterable, AsyncIterator, Mapping
 from contextlib import AsyncExitStack
@@ -34,6 +35,7 @@ from sandbox_provider_spec.v1 import (
     CostLine,
     CreateRequest,
     DestroyResult,
+    DirectoryEntry,
     DirectoryPage,
     Discovery,
     FileInfo,
@@ -58,14 +60,18 @@ from sandbox_provider_spec.v1 import (
     SpsError,
     Terminal,
     TerminalRequest,
+    connections,
+    waiting,
 )
+from sandbox_provider_spec.v1.timing import lookup
 from websockets.asyncio.client import connect
 from websockets.exceptions import InvalidStatus, WebSocketException
 
-from sps_provider_blaxel import directories, guest, images, previews, wire
+from sps_provider_blaxel import directories, dockerfile, guest, images, previews, wire
 from sps_provider_blaxel.create_spec import fingerprint, plan_create, sandbox_name
 from sps_provider_blaxel.facts import (
     BASE_IMAGE,
+    COST_FINAL_WITHIN_S,
     FILE_BYTES,
     IMAGE,
     LIMITS,
@@ -82,20 +88,51 @@ ACCOUNT_WINDOW_S = 7 * 24 * 3600  # one metrics request covers a week
 API = "https://api.blaxel.ai/v0"
 API_VERSION = "2026-04-28"  # Blaxel-Version: list replies are `{data, meta}` pages
 RUNTIME_SUFFIX = ".bl.run"
-_WAITED_LIMIT_S = 90  # Blaxel cuts a waited `POST /process` near 120 s: a longer command is polled
 _POLL_S = 0.5
+# A process output read with a wait reads again after 0.1 s, doubling to 2 s.
+_OUTPUT_POLL_FIRST_S = 0.1
+_OUTPUT_POLL_MAX_S = 2.0
+# Blaxel's gateway cuts a waited `POST /process` near 120 s (504) while the named command runs on
+# (live 2026-11-22, cloud#9466). A command still running then is read again 0.05 s after it was
+# last seen running, doubling to 2 s, and to 5 s once it has run 300 s: the read that finds it ended
+# comes at most about 1.7% of its run time late, and a follow costs 0.5, then 0.2, reads a second.
+_FOLLOW_FIRST_S = 0.05
+_FOLLOW_CAP_S = 2.0
+_FOLLOW_LONG_CAP_S = 5.0
+_FOLLOW_LONG_AFTER_S = 300
+# The marker Blaxel puts at the start of a stream it has cut short (seen in its logs replies).
+_TRUNCATED = "[... truncated"
+# Blaxel's own `timeout` kills a command at its deadline; a command followed after the cut that is
+# `killed` more than this before the deadline was not ended by its timeout.
+_EARLY_KILL_S = 2.0
 _DEPLOY_WAIT_S = 120
+# A pause: `POST /standby?force=true` is answered 202 before the sandbox is in standby (live
+# 2026-11-23: 2.8 to 5.5 s later), so the record's `state` is read again after 0.5 s, doubling to
+# 1 s. The host ignores a request that comes in the first seconds of a sandbox's life (2 of 4 live
+# at ages 1, 4, 8 and 11 s); such a sandbox still goes to standby on its own about 15 s after its
+# last request, which live took up to 22 s. So the wait is long enough for that, and no request
+# is sent twice.
+_RESUMED_KEEP_S = 60  # how long a resume is remembered: Blaxel's `state` lags it by 3 to 5 s
+_STANDBY_POLL_FIRST_S = 0.5
+_STANDBY_POLL_CAP_S = 1.0
+_STANDBY_WAIT_S = 60
+# The host ignores a standby request within 5 s of the sandbox's previous one, so a request is sent
+# once more when none has taken effect this long after the first (a standby takes 2.8 to 6.9 s).
+_RESEND_AFTER_S = 8
 # Blaxel's hourly metrics: a sandbox's cost is read from the hour it was created to the hour it
-# ended, in windows of at most seven days. Evidence 2026-10-20: a cost was final 45 to 113 s after
-# the sandbox ended, so a figure counts as final 150 s after it, once the end hour is in the reply.
+# ended, in windows of at most seven days. A figure counts as final this long after the end
+# (`facts.COST_FINAL_WITHIN_S`): live through Cloud on 2026-11-23, every bucket of 40 sandboxes
+# (lives of 3 to 150 s, 30 of them at once) was published 0 to 7 s after the destroy and never
+# changed; the 2026-10-20 evidence saw it settle 45 to 113 s after the end.
 _METRICS_WINDOW = timedelta(days=7)
-_COST_SETTLE = timedelta(seconds=150)
+_COST_SETTLE = timedelta(seconds=COST_FINAL_WITHIN_S)
 _RETRIES = (0.25, 0.5)  # the pause before each retry of a read that hit an upstream 502
 _EXTEND_MARGIN_S = (
     5  # an extension counts from the read of the sandbox, so it adds what the call takes
 )
 _TERMINAL_OPEN_S = 30
 _DIRECTORY_TIMEOUT_MS = 60_000
+_CWD_TIMEOUT_MS = 5_000
 
 
 def _plain(path: str) -> str:
@@ -110,6 +147,27 @@ def _page_cursor(meta: Any) -> str | None:
     cursor = meta.get("nextCursor") if isinstance(meta, dict) else None
     has_more = isinstance(meta, dict) and meta.get("hasMore") is True
     return cursor if has_more and isinstance(cursor, str) and cursor else None
+
+
+def _accepted(error: SpsError) -> SpsError:
+    """A failure after Blaxel accepted a standby request: the standby may still happen, so the
+    outcome is unknown. A code that is a caller's fault cannot be unknown (a key refused on a
+    later read is Blaxel's answer, not the caller's request), so it becomes a provider error."""
+    if error.code == "not_found" or error.outcome == "unknown":
+        return error
+    try:
+        return SpsError(
+            error.code,
+            error.message,
+            outcome="unknown",
+            retry_after_seconds=error.retry_after_seconds,
+        )
+    except ValueError:
+        return SpsError(
+            "provider_error",
+            f"Blaxel failed a read ({error.code}) after it accepted the standby",
+            outcome="unknown",
+        )
 
 
 class BlaxelProvider(Provider):
@@ -127,14 +185,24 @@ class BlaxelProvider(Provider):
             "Blaxel-Version": API_VERSION,
         }
         timeout = httpx.Timeout(60.0, connect=10.0)
-        self._control = httpx.AsyncClient(
+        self._control = connections.provider_client(
             base_url=API, headers=self._base_headers, transport=transport, timeout=timeout
         )
-        self._runtime = httpx.AsyncClient(transport=transport, timeout=timeout)
+        self._runtime = connections.provider_client(transport=transport, timeout=timeout)
         self._workspace: str | None = None
         self._account: str | None = None
         self._lock = asyncio.Lock()
         self._urls: dict[str, str] = {}
+        self._cwds: dict[str, str] = {}
+        self._resolved: dict[str, str] = {}
+        self._image_users: dict[str, str] = {}
+        self._users: dict[str, str] = {}
+        # Blaxel's own time (its `Date`) at each `POST /resume` this object sent. The record's
+        # `state` still says STANDBY for 3 to 5 s after a resume (live 2026-11-23), so a STANDBY
+        # record whose `lastUsedAt` is older than this time is the earlier standby's, not a pause.
+        # An entry is dropped as soon as a read no longer needs it (see `_woken`) and never kept
+        # past `_RESUMED_KEEP_S`: the lag it covers is 3 to 5 s.
+        self._resumed: dict[str, tuple[datetime, float]] = {}
 
     # -- transport ------------------------------------------------------------
 
@@ -198,7 +266,9 @@ class BlaxelProvider(Provider):
 
     async def _base(self, sandbox_id: str) -> str:
         if sandbox_id not in self._urls:
-            self._runtime_url(await self._native(sandbox_id))
+            with lookup():  # the record is read only to find the sandbox's runtime address
+                native = await self._native(sandbox_id)
+            self._runtime_url(native)
         return self._urls[sandbox_id]
 
     async def _rt(
@@ -220,7 +290,7 @@ class BlaxelProvider(Provider):
             resp = await self._send(self._runtime, method, url, headers=headers, **kw)
             if resp.status_code != 502 or not retry or pause is None:
                 break
-            await asyncio.sleep(pause)
+            await waiting.pause(pause)
         if resp.status_code >= 400 and not raw:
             raise wire.failure(resp, what)
         return resp
@@ -265,7 +335,7 @@ class BlaxelProvider(Provider):
                 raise SpsError(
                     "timeout", "Blaxel did not finish deploying the sandbox", outcome="unknown"
                 )
-            await asyncio.sleep(_POLL_S)
+            await waiting.pause(_POLL_S)
             native = await self._native(name)
         if native["status"] == "FAILED":
             raise SpsError(
@@ -273,6 +343,12 @@ class BlaxelProvider(Provider):
             )
         self._runtime_url(native)
         return native
+
+    @classmethod
+    def image_recipe_revision(cls) -> str:
+        """The digest of the tail that `image.prepare` adds to every image (`dockerfile.py`), so a
+        copy prepared with another `sandbox-api` is another copy."""
+        return dockerfile.recipe_revision()
 
     @classmethod
     def static_discovery(cls) -> Discovery:
@@ -291,8 +367,15 @@ class BlaxelProvider(Provider):
         artifact = (
             request.image.get("provider_artifact") if isinstance(request.image, Mapping) else None
         )
-        if isinstance(artifact, str) and artifact.startswith(images.PREFIX):
-            artifact = await images.resolve(self, artifact)  # a prepared image's id, to its tag
+        image_id = artifact if isinstance(artifact, str) else None
+        if isinstance(image_id, str) and image_id.startswith(images.PREFIX):
+            remembered = image_id in self._resolved
+            artifact = await images.resolve(self, image_id)  # a prepared image's id, to its tag
+        else:
+            remembered = False
+        user = self._image_user(image_id, artifact)
+        if user is not None:
+            self._users[sandbox_name(idempotency_key)] = user
         body = plan_create(request, idempotency_key, artifact)
         headers = await self._identity()
         resp = await self._send(self._control, "POST", "/sandboxes", headers=headers, json=body)
@@ -302,11 +385,56 @@ class BlaxelProvider(Provider):
                 raise SpsError("conflict", "Idempotency-Key was used with a different body")
             return self._to_sandbox(await self._deployed(native))
         if resp.status_code >= 400:
+            if remembered and image_id is not None:
+                # A tag this object remembered may be stale: forget it and read the image
+                # again, so an image that went answers its own error instead of the create's.
+                self._resolved.pop(image_id, None)
+                await images.resolve(self, image_id)
             raise wire.failure(resp, "the create")
         return self._to_sandbox(await self._deployed(resp.json()))
 
+    def _image_user(self, image_id: str | None, artifact: object) -> str | None:
+        """The default exec user of the image a create names, when this object knows it.
+
+        `sandbox-api` starts privileged — the fs daemon is root whatever the image's USER —
+        so the files endpoints are usable only when the default exec user is root too. The
+        declared base image's is a fact; a prepared image's is what `image_prepare` built in
+        (`_image_users`); any other artifact's is baked into the image and unknown here.
+        """
+        if image_id is not None and image_id.startswith(images.PREFIX):
+            return self._image_users.get(image_id)
+        if artifact is None or artifact == BASE_IMAGE:
+            return "root"
+        if isinstance(artifact, str) and artifact.startswith("sandbox/" + images.PREFIX):
+            return self._image_users.get(artifact.split("/", 1)[1].split(":", 1)[0])
+        return None
+
     async def get(self, sandbox_id: str) -> Sandbox:
-        return self._to_sandbox(await self._native(sandbox_id))
+        return self._to_sandbox(self._woken(await self._native(sandbox_id)))
+
+    def _woken(self, native: dict[str, Any]) -> dict[str, Any]:
+        """The record of a sandbox this object resumed, without the standby that the resume ended:
+        Blaxel's `state` lags the resume by seconds. Only a STANDBY record that Blaxel dates
+        before the resume is read as running; a later standby (its `lastUsedAt` is later) and a
+        record with no date are left as they are. The resume is forgotten once a read no longer
+        needs it (the record is not that old standby any more) or after `_RESUMED_KEEP_S`."""
+        name = native["metadata"]["name"]
+        self._forget_old_resumes()
+        found = self._resumed.get(name)
+        if found is None:
+            return native
+        resumed = found[0]
+        if native.get("state") == "STANDBY":
+            used = wire.last_used(native)
+            if used is not None and used < resumed:
+                return {**native, "state": "RUNNING"}
+        del self._resumed[name]
+        return native
+
+    def _forget_old_resumes(self) -> None:
+        now = asyncio.get_running_loop().time()
+        for name in [n for n, (_, at) in self._resumed.items() if now - at > _RESUMED_KEEP_S]:
+            del self._resumed[name]
 
     async def list(
         self,
@@ -325,7 +453,7 @@ class BlaxelProvider(Provider):
             page = (await self._ctl("GET", "/sandboxes", "the sandbox list", params=params)).json()
             cursor = _page_cursor(page.get("meta"))
             found = [
-                self._to_sandbox(item)
+                self._to_sandbox(self._woken(item))
                 for item in page.get("data") or []
                 if item["status"] not in wire.ENDED
                 and not images.is_record(item)
@@ -430,6 +558,29 @@ class BlaxelProvider(Provider):
         logs: dict[str, Any] = resp.json()
         return logs
 
+    async def _output(
+        self, sandbox_id: str, ident: str, info: dict[str, Any], seen: tuple[int, int] = (0, 0)
+    ) -> dict[str, Any]:
+        """A process's output so far: `stdout` and `stderr`. The process record carries both,
+        running or ended (live 2026-11-22, cloud#9466: equal to the logs read), so the logs are read
+        only when the record may not hold all of it: a stream missing or not text, a stream that
+        starts with Blaxel's truncation marker, a stream shorter than what `seen` already returned,
+        or an ended process whose record has no output at all (one read to confirm the empty end).
+        """
+        out, err = info.get("stdout"), info.get("stderr")
+        if isinstance(out, str) and isinstance(err, str):
+            ended = info.get("status") in wire.TERMINAL_PROCESS
+            trusted = (
+                not out.startswith(_TRUNCATED)
+                and not err.startswith(_TRUNCATED)
+                and len(out) >= seen[0]
+                and len(err) >= seen[1]
+                and not (ended and not out and not err)
+            )
+            if trusted:
+                return {"stdout": out, "stderr": err}
+        return await self._logs(sandbox_id, ident)
+
     async def _kill(self, sandbox_id: str, ident: str) -> None:
         try:
             await self._rt(
@@ -445,38 +596,45 @@ class BlaxelProvider(Provider):
         env: Mapping[str, str],
         timeout_ms: int,
         cwd: str | None = None,
+        *,
+        after_timeout: bool = True,
     ) -> tuple[dict[str, Any], dict[str, Any], bool]:
         """Run one command to its end: Blaxel's process record, its logs and whether it timed out.
+        A caller that has no use for them after a timeout passes `after_timeout=False`: both come
+        back empty then, and the two reads that fetch them are not made.
 
-        POST /process with waitForCompletion answers with the output once the command ends. A
-        `timeout` makes Blaxel kill the command and every process it started and answer 422. A
-        command that may outlast Blaxel's own cut of a waited request starts detached and is
-        polled.
+        One POST /process with waitForCompletion, whatever the timeout, as Blaxel's SDK sends it:
+        it answers with the exit status and the output once the command ends, and its `timeout`
+        makes Blaxel kill the command and every process it started and answer 422. Blaxel's
+        gateway cuts a waited request near 120 s (504) while the named command runs on under its
+        own `timeout`, so only a command still running then is followed by its name (`_follow`).
         """
         body = self._command(argv, env, cwd)
         seconds = ceil(timeout_ms / 1000)
         name = body["name"]
-        if seconds <= _WAITED_LIMIT_S:
-            body.update(waitForCompletion=True, timeout=seconds)
-            resp = await self._runtime_post(sandbox_id, body, timeout=seconds + 30)
-            timed_out = resp.status_code == 422 and "timed out" in resp.text
-            if resp.status_code >= 400 and not timed_out:
-                raise wire.failure(resp, "the command")
-            info = (
-                await self._process(sandbox_id, name, "the command") if timed_out else resp.json()
-            )
-            logs = await self._logs(sandbox_id, name) if timed_out else info
-            return info, logs, timed_out
-        body["timeout"] = seconds
-        resp = await self._runtime_post(sandbox_id, body)
-        if resp.status_code >= 400:
+        body.update(waitForCompletion=True, timeout=seconds)
+        started = asyncio.get_running_loop().time()
+        resp = await self._waited_post(sandbox_id, body, seconds)
+        if isinstance(resp, SpsError):  # the cut: the command may run on
+            info, timed_out = await self._follow(sandbox_id, name, started, seconds, resp)
+            if timed_out and not after_timeout:
+                return info, {}, True
+            return info, await self._output(sandbox_id, name, info), timed_out
+        timed_out = resp.status_code == 422 and "timed out" in resp.text
+        if resp.status_code >= 400 and not timed_out:
             raise wire.failure(resp, "the command")
-        info, timed_out = await self._follow(sandbox_id, name, seconds)
-        return info, await self._logs(sandbox_id, name), timed_out
+        if not timed_out:
+            return resp.json(), resp.json(), False
+        if not after_timeout:
+            return {}, {}, True
+        info = await self._process(sandbox_id, name, "the command")
+        return info, await self._output(sandbox_id, name, info), True
 
     async def quick(self, sandbox_id: str, argv: builtins.list[str]) -> tuple[int, str]:
         """A short command of the adapter's own: its exit status and stderr."""
-        info, logs, timed_out = await self.execute(sandbox_id, argv, {}, 60_000)
+        info, logs, timed_out = await self.execute(
+            sandbox_id, argv, {}, 60_000, after_timeout=False
+        )
         if timed_out:
             raise SpsError("timeout", "A command of the adapter timed out", outcome="unknown")
         return self._exit_code(info), str(logs.get("stderr") or "")
@@ -514,30 +672,69 @@ class BlaxelProvider(Provider):
             timed_out=timed_out,
         )
 
-    async def _runtime_post(
-        self, sandbox_id: str, body: dict[str, Any], *, timeout: float | None = None
-    ) -> httpx.Response:
+    async def _runtime_post(self, sandbox_id: str, body: dict[str, Any]) -> httpx.Response:
         headers = await self._identity()
         url = await self._base(sandbox_id) + "/process"
-        kw: dict[str, Any] = (
-            {} if timeout is None else {"timeout": httpx.Timeout(timeout, connect=10.0)}
-        )
-        return await self._send(self._runtime, "POST", url, headers=headers, json=body, **kw)
+        return await self._send(self._runtime, "POST", url, headers=headers, json=body)
+
+    async def _waited_post(
+        self, sandbox_id: str, body: dict[str, Any], seconds: int
+    ) -> httpx.Response | SpsError:
+        """The waited POST /process: Blaxel's answer, or, when the request was sent and no answer
+        came (the gateway's 504 near 120 s, or the connection dropped or timed out while waiting),
+        the error to raise if Blaxel does not know the command. Nothing is sent twice."""
+        headers = await self._identity()
+        url = await self._base(sandbox_id) + "/process"
+        try:
+            resp = await self._runtime.request(
+                "POST",
+                url,
+                headers=headers,
+                json=body,
+                timeout=httpx.Timeout(seconds + 30, connect=10.0),
+            )
+        except (httpx.ReadTimeout, httpx.ReadError, httpx.RemoteProtocolError):
+            return SpsError("timeout", "Blaxel did not answer", outcome="unknown")
+        except httpx.TimeoutException:
+            raise SpsError("timeout", "Blaxel did not answer", outcome="unknown") from None
+        except httpx.HTTPError:
+            raise SpsError("unavailable", "Blaxel is unreachable", outcome="unknown") from None
+        return wire.failure(resp, "the command") if resp.status_code == 504 else resp
 
     async def _follow(
-        self, sandbox_id: str, name: str, seconds: int
+        self, sandbox_id: str, name: str, started: float, seconds: int, cut: SpsError
     ) -> tuple[dict[str, Any], bool]:
-        """Poll a detached command to its end; kill it at its deadline."""
-        deadline = asyncio.get_running_loop().time() + seconds
-        while True:
+        """Follow a command whose waited request was cut to its end; kill it at its deadline,
+        `seconds` after `started` (the loop's clock). The first read is at once, then 0.05 s after
+        a running answer, doubling to 2 s, and to 5 s once the command has run 300 s; a pause
+        never passes the deadline. A command Blaxel does not know was never started: `cut` is
+        raised."""
+        loop = asyncio.get_running_loop()
+        deadline = started + seconds
+        pause = _FOLLOW_FIRST_S
+        try:
             info = await self._process(sandbox_id, name, "the command")
+        except SpsError as error:
+            if error.code == "not_found":
+                raise cut from None
+            raise
+        while True:
             if info["status"] in wire.TERMINAL_PROCESS:
+                if info["status"] == "killed" and loop.time() < deadline - _EARLY_KILL_S:
+                    raise SpsError(
+                        "provider_error",
+                        "Blaxel ended the command before its timeout",
+                        outcome="unknown",
+                    )
                 # Blaxel's own `timeout` can end it as `killed` just before our deadline.
                 return info, info["status"] == "killed"
-            if asyncio.get_running_loop().time() >= deadline:
+            if loop.time() >= deadline:
                 await self._kill(sandbox_id, name)
                 return await self._process(sandbox_id, name, "the command"), True
-            await asyncio.sleep(_POLL_S)
+            await waiting.pause(min(pause, max(deadline - loop.time(), _FOLLOW_FIRST_S)))
+            long_run = loop.time() - started >= _FOLLOW_LONG_AFTER_S
+            pause = min(pause * 2, _FOLLOW_LONG_CAP_S if long_run else _FOLLOW_CAP_S)
+            info = await self._process(sandbox_id, name, "the command")
 
     # -- files ------------------------------------------------------------------
 
@@ -699,24 +896,28 @@ class BlaxelProvider(Provider):
     async def process_output(
         self, sandbox_id: str, process_id: str, *, cursor: str | None = None, wait_ms: int = 0
     ) -> OutputPage:
-        # GET /process/{name} gives the state and GET /process/{name}/logs the output so far. The
-        # cursor is "<stdout characters>.<stderr characters>" already returned; a call with a
-        # `wait_ms` repeats the reads until there is output, an exit or the wait is over.
+        # GET /process/{name} gives the state and the output so far, one exchange a pass; the logs
+        # are read only when the record may not hold all of it (`_output`). The cursor is
+        # "<stdout characters>.<stderr characters>" already returned; a call with a `wait_ms`
+        # repeats the reads until there is output, an exit or the wait is over.
         try:
             seen_out, seen_err = (int(p) for p in cursor.split(".")) if cursor else (0, 0)
         except ValueError:
             raise SpsError("invalid_request", "The cursor is not one this adapter gave") from None
+        # The pause between reads doubles up to a cap, so a long wait costs a few calls.
         loop = asyncio.get_running_loop()
         deadline = loop.time() + min(wait_ms / 1000, MAX_WAIT_S)
+        pause = _OUTPUT_POLL_FIRST_S
         while True:
             info = await self._process(sandbox_id, process_id, "the process")
-            logs = await self._logs(sandbox_id, process_id)
+            logs = await self._output(sandbox_id, process_id, info, (seen_out, seen_err))
             out, err = logs["stdout"], logs["stderr"]
             exited = info["status"] in wire.TERMINAL_PROCESS
             fresh = len(out) > seen_out or len(err) > seen_err
             if fresh or exited or loop.time() >= deadline:
                 break
-            await asyncio.sleep(0.2)
+            await waiting.pause(min(pause, max(deadline - loop.time(), 0)))
+            pause = min(pause * 2, _OUTPUT_POLL_MAX_S)
         # A log that is shorter than what was read has lost its start.
         gap = len(out) < seen_out or len(err) < seen_err
         chunks = []
@@ -766,6 +967,109 @@ class BlaxelProvider(Provider):
         if resp.status_code >= 400:
             raise wire.failure(resp, "the cancel")
 
+    # -- pause, resume -----------------------------------------------------------------------
+
+    async def pause(self, sandbox_id: str) -> Sandbox:
+        """Blaxel's standby, asked for: `POST /standby?force=true` on the sandbox's host (`force`
+        puts it in standby although a keep-alive process holds it awake; the hold is taken back at
+        the resume). Blaxel answers 202 before the standby: a 202 is not proof, so the record is
+        read until its `state` is STANDBY (`status` stays DEPLOYED), within `_STANDBY_WAIT_S`.
+        A STANDBY record that predates the request (the standby of before a resume the record
+        still shows) is not the answer: `lastUsedAt` is the time of the last request to the
+        host (a real standby carries the second of the request that caused it), so one dated
+        before the request's own `Date` belongs to an earlier standby. The host ignores a request in the first seconds
+        of a sandbox's life and within 5 s of the sandbox's previous request, and a request to a
+        sandbox already in standby wakes it first (live 2026-11-23: one that holds a keep-alive
+        process then stayed running). So if no standby is seen `_RESEND_AFTER_S` after the
+        request, it is sent once more, past the host's quiet window; a sandbox with no such
+        process still stands by on its own about 15 s after its last request, which live took
+        up to 22 s. Whatever fails after the 202 is `unknown`: the standby was accepted."""
+        resp = await self._standby(sandbox_id)
+        asked = wire.http_date(resp.headers.get("date"))
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        deadline, delay, resent = started + _STANDBY_WAIT_S, _STANDBY_POLL_FIRST_S, False
+        while True:
+            await waiting.pause(delay)  # a standby is never seen before 2 s: no read at once
+            delay = min(delay * 2, _STANDBY_POLL_CAP_S)
+            try:
+                native = await self._native(sandbox_id)
+            except SpsError as error:
+                raise _accepted(error) from error
+            if native["status"] in wire.ENDED:
+                raise SpsError("not_found", "The sandbox has ended")
+            if native.get("state") == "STANDBY":
+                used = wire.last_used(native)
+                # `>=`, not `>`: both times are whole seconds, and a real standby carries the
+                # second of the request that caused it (live 2026-11-23: POST `Date` :56 and
+                # `lastUsedAt` :56; :22 and :22), so `>` would refuse genuine standbys and end
+                # every such pause in the 60 s timeout. What `>=` can wrongly accept is a first
+                # standby inside the resend's own second while the record read RUNNING at the
+                # resend: rare, and the resend comes at least 8 s after the first request.
+                if asked is None or used is None or used >= asked:
+                    self._resumed.pop(sandbox_id, None)
+                    return self._to_sandbox(native)
+            now = loop.time()
+            if now + delay > deadline:
+                raise SpsError(
+                    "timeout", "Blaxel did not put the sandbox in standby", outcome="unknown"
+                )
+            if not resent and now - started >= _RESEND_AFTER_S:
+                resent = True
+                try:
+                    again = await self._standby(sandbox_id)
+                except SpsError as error:
+                    raise _accepted(error) from error
+                # The resend wakes a sandbox that had already gone to standby (a record that lags
+                # still said RUNNING): a STANDBY dated before it is the first request's, and the
+                # guest runs. Only the standby that follows the resend counts from here on.
+                asked = wire.http_date(again.headers.get("date")) or asked
+
+    async def _standby(self, sandbox_id: str) -> httpx.Response:
+        return await self._host_call(sandbox_id, "/standby?force=true", "the pause")
+
+    async def _host_call(
+        self, sandbox_id: str, path: str, what: str, *, wakes: bool = False
+    ) -> httpx.Response:
+        """`POST path` on the sandbox's host, for the two calls that old images lack. A sandbox
+        whose image carries a `sandbox-api` older than 0.2.78 has neither `/standby` nor
+        `/resume` and answers 404 to both (production 2026-11-23: every sandbox made from a
+        prepared image built with the pin of 0.2.74 did). A 404 from the host does not say whether
+        the sandbox or the call is missing, so the record is read: a sandbox that has ended is
+        `not_found`. For a sandbox that is there:
+        - `/standby` did nothing: `unsupported` (failed).
+        - `/resume` (`wakes`) is answered success: Blaxel's host wakes a sandbox on any request
+          before the sandbox-api sees it, and waking is all that `/resume` asks, so the sandbox
+          runs although the call answered 404 (it would be wrong to report that as a failure)."""
+        resp = await self._rt(sandbox_id, "POST", path, what, raw=True)
+        if resp.status_code == 404:
+            native = await self._native(sandbox_id)
+            if native["status"] in wire.ENDED:
+                raise SpsError("not_found", "The sandbox has ended")
+            if wakes:
+                return resp
+            raise SpsError(
+                "unsupported",
+                f"This sandbox's image has a sandbox-api that predates {what} (it answered 404; "
+                "the call is in sandbox-api 0.2.78 and later): prepare the image again",
+            )
+        if resp.status_code == 501:
+            raise SpsError("unsupported", f"Blaxel answered HTTP 501 to {what}")
+        if resp.status_code >= 400:
+            raise wire.failure(resp, what)
+        return resp
+
+    async def resume(self, sandbox_id: str) -> None:
+        """`POST /resume` on the sandbox's host, one call: Blaxel answers 200 once the sandbox runs
+        (0.1 s live), and the next command runs 0.1 s later. The record is `get`'s, which does not
+        wait for the control plane's own `state` to catch up (see `_woken`). The guest was frozen,
+        not restarted: its processes carry on, a keep-alive hold is taken back by Blaxel."""
+        resp = await self._host_call(sandbox_id, "/resume", "the resume", wakes=True)
+        resumed = wire.http_date(resp.headers.get("date"))
+        self._forget_old_resumes()
+        if resumed is not None:
+            self._resumed[sandbox_id] = (resumed, asyncio.get_running_loop().time())
+
     # -- lifetime, previews, terminals, directories ---------------------------------------
 
     async def lifetime_extend(self, sandbox_id: str, seconds: int) -> Sandbox:
@@ -779,7 +1083,7 @@ class BlaxelProvider(Provider):
         runtime = (native.get("spec") or {}).get("runtime") or {}
         ttl, left = wire.ttl_seconds(runtime.get("ttl")), native.get("expiresIn")
         if ttl is None or not isinstance(left, int) or left >= seconds:
-            return self._to_sandbox(native)
+            return self._to_sandbox(self._woken(native))
         body = {
             "metadata": {
                 k: v
@@ -794,7 +1098,7 @@ class BlaxelProvider(Provider):
         resp = await self._ctl(
             "PUT", f"/sandboxes/{quote(sandbox_id, safe='')}", "the lifetime update", json=body
         )
-        return self._to_sandbox(resp.json())
+        return self._to_sandbox(self._woken(resp.json()))
 
     async def terminal_open(self, sandbox_id: str, request: TerminalRequest) -> Terminal:
         # The program runs inside a launcher script that records its exit status (see terminal.py),
@@ -884,18 +1188,99 @@ class BlaxelProvider(Provider):
             raise SpsError("timeout", "The directory operation timed out", outcome="unknown")
         return result
 
+    async def _cwd(self, sandbox_id: str) -> str:
+        """The working directory a command and the filesystem daemon share. It depends on the
+        image and the user, so it is learned from the sandbox once and kept for its life."""
+        cwd = self._cwds.get(sandbox_id)
+        if cwd is not None:
+            return cwd
+        info, logs, timed_out = await self.execute(sandbox_id, ["pwd"], {}, _CWD_TIMEOUT_MS)
+        out = str(logs.get("stdout") or "").strip()
+        if timed_out or self._exit_code(info) != 0 or not out.startswith("/"):
+            raise SpsError("provider_error", "The sandbox's working directory could not be read")
+        self._cwds[sandbox_id] = out
+        return out
+
     async def files_list(
         self, sandbox_id: str, path: str, *, cursor: str | None = None, limit: int = 100
     ) -> DirectoryPage:
-        result = await self._script(sandbox_id, directories.LIST, path)
-        if result.exit_code != 0:
-            raise directories.failure(result, "the listing")
-        if result.stdout_truncated:
-            raise SpsError("provider_error", "The directory is too large to list")
-        entries = directories.parse_listing(result.stdout)
-        return directories.page(entries, cursor, limit, LIST_LIMIT)
+        # GET /filesystem/{dir} lists the entries with a file's size and a mode but no size
+        # for a directory, which one `stat` of the page's directories adds (see directories.py).
+        # Blaxel refuses a `..` segment (400): `.` and `..` inside the path are normalized away
+        # here, and a plain relative path goes to the daemon untouched, which resolves it
+        # against the sandbox's working directory. A `..` that climbs out of the path's own
+        # frame is resolved against that same directory, which one `pwd` learns.
+        directories.check_path(path)
+        where = posixpath.normpath(path)
+        if where.split("/")[0] == "..":
+            where = posixpath.normpath(posixpath.join(await self._cwd(sandbox_id), where))
+        resp = await self._rt(
+            sandbox_id, "GET", f"/filesystem/{_plain(where)}", "the listing", retry=True, raw=True
+        )
+        if resp.status_code >= 400:
+            if "ermission denied" in resp.text:
+                raise SpsError("forbidden", "the listing: permission denied")
+            raise wire.failure(resp, "the listing")
+        try:
+            body = resp.json()
+        except ValueError:
+            body = None  # a file answers its own bytes
+        page = directories.page(directories.listing(body), cursor, limit, LIST_LIMIT)
+        dirs = [e.name for e in page.entries if e.type == "directory"]
+        if not dirs:
+            return page
+        info, logs, timed_out = await self.execute(
+            sandbox_id,
+            [*directories.DIR_SIZES, *(posixpath.join(where, name) for name in dirs)],
+            {},
+            _DIRECTORY_TIMEOUT_MS,
+        )
+        sizes = str(logs.get("stdout") or "").split()
+        if (
+            timed_out
+            or self._exit_code(info) != 0
+            or len(sizes) != len(dirs)
+            or not all(n.isdecimal() for n in sizes)
+        ):
+            raise SpsError("provider_error", "The listing could not read a directory's size")
+        by_name = dict(zip(dirs, (int(n) for n in sizes), strict=True))
+        entries = [
+            DirectoryEntry(name=e.name, type=e.type, size=by_name[e.name])
+            if e.type == "directory"
+            else e
+            for e in page.entries
+        ]
+        return DirectoryPage(entries=entries, next_cursor=page.next_cursor)
 
     async def files_mkdir(self, sandbox_id: str, path: str, *, parents: bool = False) -> None:
+        # The fs daemon is root: the endpoint makes root-owned directories a non-root default
+        # user could not write into. Its privilege must match the exec's, so the endpoint is
+        # used only when the sandbox's default user is root (or unknown, which keeps the exec).
+        if parents and self._users.get(sandbox_id) == "root":
+            # PUT /filesystem/{dir} with isDirectory makes the directory and its missing
+            # ancestors, as `mkdir -p`, and answers an existing directory the same way. The
+            # plain mkdir keeps the in-sandbox script: the endpoint parents a missing ancestor
+            # that must be a `not_found`.
+            resp = await self._rt(
+                sandbox_id,
+                "PUT",
+                f"/filesystem/{_plain(path)}",
+                "the mkdir",
+                raw=True,
+                json={"isDirectory": True, "permissions": "0755"},
+            )
+            if resp.status_code >= 400:
+                if "is a directory" in resp.text:
+                    # The endpoint's own idempotency is unreliable: a repeat PUT on an
+                    # existing directory answers 200 once and 422 "open <path>: is a
+                    # directory" the next. `mkdir -p` answers that case successfully.
+                    return
+                if "xist" in resp.text or "ot a director" in resp.text:
+                    raise SpsError("conflict", f"An entry that is not a directory is at {path}")
+                if "ermission denied" in resp.text:
+                    raise SpsError("forbidden", "the mkdir: permission denied")
+                raise wire.failure(resp, "the mkdir")
+            return
         result = await self._script(sandbox_id, directories.MKDIR, path, flag=parents)
         if result.exit_code != 0:
             raise directories.failure(result, "the mkdir")
@@ -903,6 +1288,28 @@ class BlaxelProvider(Provider):
     async def files_remove(self, sandbox_id: str, path: str, *, recursive: bool = False) -> None:
         if path and path.strip("/") == "":
             raise SpsError("invalid_request", "The root cannot be removed")
+        if recursive and self._users.get(sandbox_id) == "root":
+            # DELETE /filesystem/{p}?recursive removes a file, link or tree in one call. The
+            # daemon is root: on an image whose default user is not, it would delete what the
+            # exec's `rm -rf` could not, so the exec keeps that case. A removal without
+            # `recursive` keeps the in-sandbox script: the endpoint does not say it left a
+            # non-empty directory alone (a `conflict` that removes nothing).
+            resp = await self._rt(
+                sandbox_id,
+                "DELETE",
+                f"/filesystem/{_plain(path)}",
+                "the removal",
+                raw=True,
+                params={"recursive": "true"},
+            )
+            if resp.status_code >= 400:
+                lowered = resp.text.lower()
+                if resp.status_code == 404 or "no such" in lowered or "not found" in lowered:
+                    raise SpsError("not_found", f"No such file or directory: {path}")
+                if "ermission denied" in resp.text:
+                    raise SpsError("forbidden", "the removal: permission denied")
+                raise wire.failure(resp, "the removal")
+            return
         result = await self._script(sandbox_id, directories.REMOVE, path, flag=recursive)
         if result.exit_code != 0:
             raise directories.failure(result, "the removal")
@@ -1035,8 +1442,11 @@ class BlaxelProvider(Provider):
         # GET /accounts/{id}/metrics: the sandbox's cost in hourly buckets, from the hour it was
         # created to the hour it ended (or the hour now, while it runs). Blaxel's amounts are its
         # list prices (see sandbox-provider-pricing). When Blaxel no longer holds the sandbox's
-        # record, the caller's `created_at` hint starts the window and the figure is read as of
-        # the last hour with a bucket.
+        # record, the caller's `created_at` hint starts the window. A 404 here is read as: ended
+        # and dropped (`_cost_of_gone`), so a caller gives the hint only for a sandbox that has
+        # ended. Cloud does: its cost pass reads a sandbox from its own end plus pricing's first
+        # read delay, and its image-copy pass after the prepare is recorded; a capture before a
+        # destroy gives no hint, so a 404 there is `not_found`.
         headers = await self._identity()
         path = f"/sandboxes/{quote(sandbox_id, safe='')}"
         resp = await self._send(self._control, "GET", path, headers=headers)
@@ -1051,16 +1461,22 @@ class BlaxelProvider(Provider):
         return await self._cost_between(sandbox_id, created, end, read_at)
 
     async def _cost_of_gone(self, sandbox_id: str, created_at: datetime, read_at: datetime) -> Cost:
-        """The cost of a sandbox whose record Blaxel has dropped: its end is not known, so the figure
-        is final once the newest hour that holds a bucket is a full hour and `_COST_SETTLE` old."""
+        """The cost of a sandbox whose record Blaxel has dropped: the sum of its buckets, final.
+
+        Blaxel drops a deleted sandbox's record long after it has published the sandbox's buckets
+        (live 2026-11-23: buckets 0 to 7 s after the destroy; of sixteen records two were dropped
+        about 16 minutes after it, the others were still there at 15 to 52 minutes), so what the
+        metrics hold then is all there will be. With no bucket that has
+        a cost, Blaxel holds nothing for the sandbox: `not_found`.
+        """
         account = await self._account_id()
         first = wire.hour_start(created_at)
         buckets, now = await self._metrics(
             account, sandbox_id, first, wire.hour_start(read_at) + wire.HOUR
         )
-        last = max((wire.stamp(b["timestamp"]) for b in buckets), default=None)
-        end = None if last is None else last + wire.HOUR
-        return self._cost_from(sandbox_id, buckets, first, end, now, ended=True)
+        if not any(Decimal(str(b["cost"])) for b in buckets):
+            raise SpsError("not_found", "Blaxel holds no cost for this sandbox")
+        return self._cost_from(sandbox_id, buckets, first, None, now, final=True)
 
     async def _cost_between(
         self, sandbox_id: str, created: datetime, end: datetime | None, read_at: datetime
@@ -1069,7 +1485,8 @@ class BlaxelProvider(Provider):
         first = wire.hour_start(created)
         last = wire.hour_start(end or read_at) + wire.HOUR
         buckets, now = await self._metrics(account, sandbox_id, first, last)
-        return self._cost_from(sandbox_id, buckets, first, end, now, ended=end is not None)
+        settled = end is not None and now - end >= _COST_SETTLE
+        return self._cost_from(sandbox_id, buckets, first, end, now, final=settled)
 
     @staticmethod
     def _cost_from(
@@ -1079,8 +1496,11 @@ class BlaxelProvider(Provider):
         end: datetime | None,
         now: datetime,
         *,
-        ended: bool,
+        final: bool,
     ) -> Cost:
+        """The sandbox's hourly buckets from `first` to the hour of `end` (all of them without an
+        end). Blaxel answers every hour of the window, with a cost of 0 for the hours the sandbox
+        did not run, so a figure is `final` only when `final` holds and a bucket has a cost."""
         last = None if end is None else wire.hour_start(end) + wire.HOUR
         lines: builtins.list[CostLine] = []
         for item in sorted(buckets, key=lambda b: b["timestamp"]):
@@ -1091,14 +1511,11 @@ class BlaxelProvider(Provider):
                         "memory", Decimal(str(item["cost"])), None, None, begins, begins + wire.HOUR
                     )
                 )
-        holds_end = end is not None and any(
-            wire.stamp(b["timestamp"]) == wire.hour_start(end) for b in buckets
-        )
-        final = ended and holds_end and end is not None and now - end >= _COST_SETTLE
+        costed = any(line.amount_usd for line in lines)
         total = sum((line.amount_usd or Decimal(0) for line in lines), start=Decimal(0))
         return Cost(
             sandbox_id=sandbox_id,
-            status="final" if final else "accruing",
+            status="final" if final and costed else "accruing",
             total_usd=total if lines else None,
             source="reported",
             lines=tuple(lines),

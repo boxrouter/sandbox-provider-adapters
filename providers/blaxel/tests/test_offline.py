@@ -7,6 +7,8 @@ from __future__ import annotations
 import asyncio
 import json
 import shlex
+import shutil
+import stat
 import subprocess
 from collections.abc import AsyncIterator
 from decimal import Decimal
@@ -22,13 +24,62 @@ from sandbox_provider_spec.v1 import (
     RunRequest,
     SpsError,
     TerminalRequest,
+    waiting,
 )
 
 from sps_provider_blaxel import BlaxelProvider
 from sps_provider_blaxel.create_spec import sandbox_name
 
 DATE = "Sat, 21 Nov 2026 01:21:30 GMT"
+NOW = "2026-11-21T01:21:30.000Z"  # `DATE`, as the record's `lastUsedAt` prints a time
+EARLIER = "2026-11-21T01:21:20.000Z"  # the time of a standby before `DATE`
 RUNTIME = "https://sbx-{name}-empkgz.us-pdx-1.bl.run"
+
+
+def _go_mode(st_mode: int) -> str:
+    """The `permissions` of a listing entry: the Go `FileMode` as an octal string (the type is in
+    the bits above the permissions: dir 1<<31, link 1<<27, device 1<<26, pipe 1<<25, socket
+    1<<24, char device 1<<21, and setuid/setgid/sticky at 23/22/20), as the live Blaxel prints it."""
+    bits = st_mode & 0o777  # the nine permission characters
+    for host, go in ((stat.S_ISUID, 1 << 23), (stat.S_ISGID, 1 << 22), (stat.S_ISVTX, 1 << 20)):
+        if st_mode & host:
+            bits |= go
+    if stat.S_ISLNK(st_mode):
+        bits |= 1 << 27
+    elif stat.S_ISFIFO(st_mode):
+        bits |= 1 << 25
+    elif stat.S_ISSOCK(st_mode):
+        bits |= 1 << 24
+    elif stat.S_ISCHR(st_mode):
+        bits |= (1 << 26) | (1 << 21)  # a char device is device | char-device in Go
+    elif stat.S_ISBLK(st_mode):
+        bits |= 1 << 26
+    return oct(bits)[2:]
+
+
+def _native_listing(directory: Path) -> dict[str, Any]:
+    """Blaxel's `GET /filesystem/{dir}`: an entry that is not a directory is a file with its own
+    (`lstat`) size and its mode as an octal `FileMode` string, a directory is named only."""
+    files, subdirectories = [], []
+    for entry in sorted(directory.iterdir()):
+        info = entry.lstat()
+        if stat.S_ISDIR(info.st_mode):
+            subdirectories.append({"name": entry.name, "path": str(entry)})
+        else:
+            files.append(
+                {
+                    "name": entry.name,
+                    "path": str(entry),
+                    "size": info.st_size,
+                    "permissions": _go_mode(info.st_mode),
+                }
+            )
+    return {
+        "name": directory.name,
+        "path": str(directory),
+        "files": files,
+        "subdirectories": subdirectories,
+    }
 
 
 class FakeBlaxel:
@@ -47,6 +98,20 @@ class FakeBlaxel:
         self.stdin: dict[str, bytes] = {}
         self.preview_records: dict[str, dict[str, Any]] = {}
         self.files_dir: Path | None = None  # where a real `sh -c` command runs
+        # Standby, as Blaxel's two hosts do it: `POST /standby` is answered 202 and the record's
+        # `state` says STANDBY only after this many reads that say RUNNING; `POST /resume` is
+        # answered 200 and the record says STANDBY (the standby's own `lastUsedAt`) for this many
+        # more reads. A host that ignores a standby request leaves the state as it was.
+        self.standby_reads = 2
+        self.resume_reads = 3
+        self.ignored_standbys = 0  # the next N standby requests are answered 202 and ignored
+        # A sandbox-api older than 0.2.78 (the pin of prepared images until 0.3.5) has no
+        # `/standby` and no `/resume`: the host answers 404 to both.
+        self.old_sandbox_api = False
+        self.standby_dates: list[str] = []  # the `Date` of the next standby answers, in order
+        self.scripted: list[dict[str, Any]] = []  # fields laid over the next record reads
+        self.standby_for: dict[str, int] = {}  # sandbox -> reads left before STANDBY
+        self.resume_for: dict[str, int] = {}  # sandbox -> reads left before RUNNING
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.handle)
@@ -110,6 +175,10 @@ class FakeBlaxel:
         record = self.sandboxes.get(name)
         if record is None:
             return self._json({"code": 404, "error": "Sandbox not found"}, 404)
+        if method == "GET":
+            self._advance(name, record)
+            if self.scripted:
+                return self._json({**record, **self.scripted.pop(0)})
         if method == "PUT":
             body = json.loads(request.content)
             self.updates.append(body)
@@ -119,6 +188,20 @@ class FakeBlaxel:
             record["status"] = "DELETING"
             record["metadata"]["updatedAt"] = "2026-11-21T01:21:08.861739444Z"
         return self._json(record)
+
+    def _advance(self, name: str, record: dict[str, Any]) -> None:
+        """One read of a sandbox's record: its pending standby or resume comes a step closer."""
+        if self.standby_for.get(name) == 0:
+            del self.standby_for[name]
+            record.update(state="STANDBY", lastUsedAt=NOW)
+        elif name in self.standby_for:
+            self.standby_for[name] -= 1
+            record.setdefault("state", "RUNNING")
+        if self.resume_for.get(name) == 0:
+            del self.resume_for[name]
+            record.update(state="RUNNING", lastUsedAt=NOW)
+        elif name in self.resume_for:
+            self.resume_for[name] -= 1
 
     def previews(self, request: httpx.Request, sandbox: str, method: str) -> httpx.Response:
         if sandbox not in self.sandboxes:
@@ -143,9 +226,37 @@ class FakeBlaxel:
 
     def runtime(self, request: httpx.Request) -> httpx.Response:
         path, method = request.url.path, request.method
+        name = request.url.host.split("-")[1] if request.url.host.startswith("sbx-") else ""
+        if path in ("/standby", "/resume") and method == "POST" and self.old_sandbox_api:
+            return self._json({"error": "404 page not found"}, 404)
+        if path == "/standby" and method == "POST":
+            assert request.url.params["force"] == "true"
+            record = self.sandboxes.get(name)
+            if self.ignored_standbys > 0:
+                self.ignored_standbys -= 1
+                if record is not None and record.get("state") == "STANDBY":
+                    # the request woke a sandbox in standby, and no standby followed
+                    record.update(state="RUNNING", lastUsedAt=NOW)
+                    self.resume_for.pop(name, None)
+            elif record is not None:
+                self.standby_for[name] = self.standby_reads
+                self.resume_for.pop(name, None)  # the sandbox runs again, whatever the record says
+            date = self.standby_dates.pop(0) if self.standby_dates else DATE
+            return httpx.Response(
+                202, json={"path": "", "message": "Standby requested"}, headers={"date": date}
+            )
+        if path == "/resume" and method == "POST":
+            record = self.sandboxes.get(name)
+            if record is not None and record.get("state") == "STANDBY":
+                self.resume_for[name] = self.resume_reads
+            return self._json({"path": "", "message": "Sandbox is running"})
         if path == "/process" and method == "POST":
             body = json.loads(request.content)
-            if "# sps-directory" in body["command"] and body.get("waitForCompletion"):
+            if (
+                body["command"].startswith("stat -c ")
+                or body["command"] == "pwd"
+                or ("# sps-directory" in body["command"] and body.get("waitForCompletion"))
+            ):
                 done = subprocess.run(
                     shlex.split(body["command"]),
                     capture_output=True,
@@ -177,6 +288,12 @@ class FakeBlaxel:
             if "sleep 99" in body["command"] and body.get("waitForCompletion"):
                 self.processes[body["name"]] = {**info, "status": "killed", "exitCode": -1}
                 return self._json({"error": "process timed out after 1 seconds"}, 422)
+            if "sleep 150" in body["command"] and body.get("waitForCompletion"):
+                # Blaxel's gateway cuts a waited request near 120 s; the command runs on.
+                info.update(status="running", stdout="", stderr="")
+                info["_then"] = {"status": "completed", "stdout": "late\n"}
+                self.processes[body["name"]] = info
+                return self._json({"error": "upstream request timeout"}, 504)
             if not body.get("waitForCompletion"):
                 info.update(status="running", exitCode=0, stdout="", stderr="")
                 if body.get("stdin"):
@@ -215,6 +332,16 @@ class FakeBlaxel:
             return self._json(info)
         if path.startswith("/filesystem/"):
             key = path.removeprefix("/filesystem/")
+            if method == "PUT" and request.headers["content-type"].startswith("application/json"):
+                if json.loads(request.content).get("isDirectory"):
+                    # a relative key is the daemon's working directory, as the real fs resolves it
+                    real = Path(key) if key.startswith("/") else Path(self.files_dir or "/") / key
+                    try:
+                        real.mkdir(parents=True, exist_ok=True)
+                    except OSError as error:
+                        return self._json({"error": str(error)}, 400)
+                    return self._json({"path": key, "message": "created"})
+                return self._json({"error": "bad put"}, 400)
             if method == "PUT":
                 boundary = request.headers["content-type"].split("boundary=")[1].encode()
                 part = request.content.split(b'filename="content"\r\n')[1]
@@ -222,9 +349,30 @@ class FakeBlaxel:
                 assert int(request.headers["content-length"]) == len(request.content)
                 self.files["/" + key.lstrip("/")] = content
                 return self._json({"path": key, "message": "uploaded"})
+            if method == "DELETE" and request.url.params.get("recursive") == "true":
+                real = Path(key) if key.startswith("/") else Path(self.files_dir or "/") / key
+                if real.is_symlink() or real.is_file():
+                    real.unlink()
+                elif real.is_dir():
+                    shutil.rmtree(real)
+                elif "/" + key.lstrip("/") in self.files:
+                    del self.files["/" + key.lstrip("/")]
+                else:
+                    return self._json({"error": "no such file"}, 404)
+                return self._json({"message": "deleted"})
             if method == "DELETE":
                 self.deleted.append("/" + key.lstrip("/"))
                 return self._json({"message": "deleted"})
+            real = Path("/" + key.lstrip("/"))
+            if (
+                self.files_dir is not None
+                and method == "GET"
+                and "download" not in request.url.params
+            ):
+                if real.is_dir():
+                    return self._json(_native_listing(real))
+                if real.is_file():
+                    return self._json({"path": key, "content": real.read_text()})
             if key.lstrip("/") == "dir":
                 return self._json({"files": [], "subdirectories": []})
             if "download" not in request.url.params and "/" + key.lstrip("/") in self.files:
@@ -307,6 +455,7 @@ def test_replayed_create_returns_the_first_sandbox(provider: BlaxelProvider) -> 
         CreateRequest(at_end="paused"),
         CreateRequest(requirements={"network_lockdown": {}}),
         CreateRequest(requirements={"idle_shutdown": {"on_idle": "destroyed"}}),
+        CreateRequest(requirements={"pause_resume": {"keeps": "files_and_memory"}}),
         CreateRequest(resources={"region": "blaxel:mars-1"}),
         CreateRequest(image="nope"),
         CreateRequest(snapshot="s1"),
@@ -421,6 +570,49 @@ def test_files_round_trip_and_a_directory_is_refused(provider: BlaxelProvider) -
     assert (error.value.code, error.value.outcome) == ("invalid_request", "unknown")
 
 
+def test_a_command_with_a_long_timeout_is_one_waited_request(
+    provider: BlaxelProvider, fake: FakeBlaxel, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A command with the benchmark's 600 s timeout (Core sends 610 s with its kill margin) is one
+    waited POST that carries the whole timeout, as Blaxel's SDK sends it: no detached start, no
+    poll (the 2026-11-22 runs paid a process start and output polls for it)."""
+    pauses: list[float] = []
+
+    async def recorded(seconds: float) -> None:
+        pauses.append(seconds)
+
+    monkeypatch.setattr(waiting, "pause", recorded)
+    box = run(provider.create(CreateRequest(), idempotency_key="k"))
+    since = len(fake.requests)
+    result = run(provider.run(box.id, RunRequest(argv=["echo", "hi"], timeout_ms=610_000)))
+    assert (result.exit_code, result.stdout, result.timed_out) == (0, "hello\n", False)
+    sent = [json.loads(r.content) for r in fake.requests[since:]]
+    assert len(sent) == 1 and sent[0]["waitForCompletion"] is True and sent[0]["timeout"] == 610
+    assert pauses == []
+    longest = RunRequest(argv=["true"], timeout_ms=3_600_000)
+    assert run(provider.run(box.id, longest)).exit_code == 0
+    with pytest.raises(SpsError) as error:
+        run(provider.run(box.id, RunRequest(argv=["true"], timeout_ms=3_600_001)))
+    assert error.value.code == "invalid_request"
+
+
+def test_a_command_still_running_when_the_gateway_cuts_its_request_is_followed(
+    provider: BlaxelProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Blaxel's gateway answers a waited request 504 near 120 s while the command runs on: it is
+    read by its name, again 0.05 s after a running answer, to its end; nothing is sent twice."""
+    pauses: list[float] = []
+
+    async def recorded(seconds: float) -> None:
+        pauses.append(seconds)
+
+    monkeypatch.setattr(waiting, "pause", recorded)
+    box = run(provider.create(CreateRequest(), idempotency_key="k"))
+    result = run(provider.run(box.id, RunRequest(argv=["sleep", "150"], timeout_ms=300_000)))
+    assert (result.exit_code, result.stdout, result.timed_out) == (0, "late\n", False)
+    assert pauses == [0.05]
+
+
 def test_a_background_process_is_followed_to_its_exit(provider: BlaxelProvider) -> None:
     box = run(provider.create(CreateRequest(), idempotency_key="k"))
     process = run(provider.process_start(box.id, ProcessStartRequest(argv=["sleep", "2"])))
@@ -470,7 +662,7 @@ def test_cost_is_accruing_while_it_runs_and_final_once_settled(
 
 def test_what_it_does_not_claim_is_unsupported(provider: BlaxelProvider) -> None:
     box = run(provider.create(CreateRequest(), idempotency_key="k"))
-    for call in (provider.pause(box.id), provider.snapshot_get("x"), provider.tcp_link(box.id, 80)):
+    for call in (provider.snapshot_get("x"), provider.tcp_link(box.id, 80)):
         with pytest.raises(SpsError) as error:
             run(call)
         assert error.value.code == "unsupported"
@@ -651,6 +843,7 @@ def test_files_list_gives_name_order_types_and_sizes_and_never_follows_a_link(
     ]
     assert next(e for e in page.entries if e.name == "b").size == 5
     assert next(e for e in page.entries if e.name == "c").size == len("/nonexistent")
+    assert next(e for e in page.entries if e.name == "a").size == (tree / "a").lstat().st_size
     assert page.next_cursor is None
 
 
@@ -709,6 +902,7 @@ def test_files_remove(provider: BlaxelProvider, tree: Path) -> None:
     (tree / "target").mkdir()
     (tree / "target/keep").write_text("keep")
     (tree / "link").symlink_to(tree / "target")
+    (tree / "link2").symlink_to(tree / "target")
     (tree / "file").write_text("x")
     box = _sandbox(provider)
     run(provider.files_remove(box, str(tree / "file")))
@@ -720,12 +914,40 @@ def test_files_remove(provider: BlaxelProvider, tree: Path) -> None:
     assert not (tree / "full").exists()
     run(provider.files_remove(box, str(tree / "link")))
     assert not (tree / "link").is_symlink() and (tree / "target/keep").exists()
+    run(provider.files_remove(box, str(tree / "link2"), recursive=True))
+    assert not (tree / "link2").is_symlink() and (tree / "target/keep").exists()
     with pytest.raises(SpsError) as error:
         run(provider.files_remove(box, str(tree / "nothing")))
     assert error.value.code == "not_found"
     with pytest.raises(SpsError) as error:
+        run(provider.files_remove(box, str(tree / "nothing"), recursive=True))
+    assert error.value.code == "not_found"
+    with pytest.raises(SpsError) as error:
         run(provider.files_remove(box, "/", recursive=True))
     assert error.value.code == "invalid_request"
+
+
+def test_the_files_endpoints_serve_only_a_root_default_user(
+    provider: BlaxelProvider, fake: FakeBlaxel, tree: Path
+) -> None:
+    """The fs daemon is root: on an image whose default user is not, its mkdir/remove would
+    out-privilege the exec, so only a remembered root default user uses the endpoints."""
+    box = _sandbox(provider)  # the declared base image: the default user is root
+    assert provider._users[box] == "root"
+    run(provider.files_mkdir(box, str(tree / "d"), parents=True))
+    run(provider.files_remove(box, str(tree / "d"), recursive=True))
+    kinds = {(r.method, r.url.path.split("/")[1]) for r in fake.requests}
+    assert ("PUT", "filesystem") in kinds and ("DELETE", "filesystem") in kinds
+
+    fake.requests.clear()
+    provider._users[box] = "alice"  # a non-root default user
+    run(provider.files_mkdir(box, str(tree / "e"), parents=True))
+    assert (tree / "e").is_dir()
+    run(provider.files_remove(box, str(tree / "e"), recursive=True))
+    assert not (tree / "e").exists()
+    paths = {(r.method, r.url.path.split("/")[1]) for r in fake.requests}
+    assert ("PUT", "filesystem") not in paths and ("DELETE", "filesystem") not in paths
+    assert ("POST", "process") in paths
 
 
 def test_files_exists_names_the_entry_and_does_not_follow_a_link(

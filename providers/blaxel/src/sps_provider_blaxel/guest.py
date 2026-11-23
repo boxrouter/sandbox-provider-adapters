@@ -4,18 +4,20 @@
 
 Blaxel's process API takes one command string and answers with each stream as text, so a stream
 with bytes that are not UTF-8 would be changed on the way. `run` with a `user` or with
-`output: base64` therefore runs the command inside a wrapper (`WRAPPER`, a Bash script that gets
-the command as its own arguments, so no quoting layer touches it):
+`output: base64` therefore runs the command inside a short `sh` script (`WRAPPER`, which gets the
+command as its own arguments, so no quoting layer touches it):
 
-- the command's streams go to two files in a private directory, and nothing else reaches Blaxel's
-  text;
-- the wrapper answers with the exit status and, for each stream, its size and its bytes in base64 (up
-  to `INLINE` bytes); a larger stream stays in its file, and the adapter reads the first
-  `output_limit_bytes` of it and removes the directory;
+- the command's streams go to two files, `<stage>.o` and `<stage>.e`, and nothing else reaches
+  Blaxel's text;
+- the script answers with one header line (the exit status, each stream's size, `KEEP` or `-`)
+  and the first `n` bytes of each stream, both in one base64 text: `n` is the smaller of
+  `output_limit_bytes` and `INLINE`, and the sizes say where one stream ends. A stream over `INLINE`
+  that the limit allows more of stays in its file (`KEEP`): the adapter reads the first
+  `output_limit_bytes` of it and removes the files, and otherwise the script removes them;
 - a `user` is switched to by `SWITCH` (`setpriv` where it can set ids, else `su`, which is what
-  Blaxel's Alpine image has), after the wrapper has found that the user exists.
+  Blaxel's Alpine image has), after the script has found that the user exists.
 
-A command that Blaxel's own timeout ends takes the wrapper with it; the adapter then reads what the
+A command that Blaxel's own timeout ends takes the script with it; the adapter then reads what the
 two files hold and removes them.
 """
 
@@ -82,47 +84,48 @@ command -v su >/dev/null 2>&1 || exit 121
     + _SU
 )
 
-#: `bash -c WRAPPER sps-run <dir> <cwd> <user> <limit> <inline> <switch> <command...>`
-WRAPPER = r"""d=$1 cwd=$2 user=$3 limit=$4 inline=$5 sw=$6
-shift 6
-for t in base64 head wc tr mkdir; do
-  command -v "$t" >/dev/null 2>&1 || { printf 'SPS-NOTOOL %s\n' "$t"; exit 0; }
+#: `sh -c WRAPPER sps-run <stage> <cwd> <user> <n> <limit> [<switch>] <command...>`: the switch is
+#: given only with a user. One process each for `wc`, `head`, `base64` and `rm` besides the command.
+WRAPPER = r"""d=$1 c=$2 u=$3 n=$4 l=$5
+shift 5
+for t in base64 head wc rm; do
+  command -v "$t" >/dev/null || { echo "SPS-NOTOOL $t"; exit 0; }
 done
-if [ -n "$user" ]; then
-  command -v getent >/dev/null 2>&1 || { printf 'SPS-NOTOOL getent\n'; exit 0; }
-  getent passwd "$user" >/dev/null 2>&1 || { printf 'SPS-NOUSER\n'; exit 0; }
+if [ -n "$u" ]; then
+  command -v getent >/dev/null || { echo "SPS-NOTOOL getent"; exit 0; }
+  getent passwd "$u" >/dev/null 2>&1 || { echo SPS-NOUSER; exit 0; }
+  w=$1
+  shift
 fi
-if [ -n "$cwd" ]; then
-  cd -- "$cwd" 2>/dev/null || { printf 'SPS-NOCWD\n'; exit 0; }
-fi
-mkdir -m 700 -- "$d" 2>/dev/null || { printf 'SPS-NOSTAGE\n'; exit 0; }
-if [ -n "$user" ]; then
-  /bin/sh -c "$sw" sps-user "$user" "$@" >"$d/o" 2>"$d/e" </dev/null
+[ -z "$c" ] || cd -- "$c" 2>/dev/null || { echo SPS-NOCWD; exit 0; }
+m=$(umask)
+umask 077
+{ true >"$d.o" && true >"$d.e"; } 2>/dev/null || { umask "$m"; echo SPS-NOSTAGE; exit 0; }
+umask "$m"
+if [ -n "$u" ]; then
+  /bin/sh -c "$w" sps-user "$u" "$@" >"$d.o" 2>"$d.e" </dev/null
 else
-  "$@" >"$d/o" 2>"$d/e" </dev/null
+  "$@" >"$d.o" 2>"$d.e" </dev/null
 fi
 s=$?
-printf '%s\n' "$s"
-keep=
-for f in o e; do
-  n=$(wc -c <"$d/$f" | tr -d ' ')
-  printf '%s ' "$n"
-  if [ "$n" -le "$inline" ] || [ "$limit" -le "$inline" ]; then
-    head -c "$limit" "$d/$f" | base64 | tr -d '\n'
-  else
-    keep=1
-    printf '@'
-  fi
-  printf '\n'
-done
-if [ -n "$keep" ]; then printf 'KEEP\n'; else rm -rf -- "$d"; fi
+set -- $(wc -c "$d.o" "$d.e")
+k=-
+[ "$l" -gt "$n" ] && { [ "$1" -gt "$n" ] || [ "$3" -gt "$n" ]; } && k=KEEP
+echo "$s $1 $3 $k"
+head -q -c "$n" "$d.o" "$d.e" | base64
+[ "$k" = KEEP ] || rm -f "$d.o" "$d.e"
 """
 
 
 #: `/bin/sh -c COPY_AS sps-write <user> <staging file> <switch> <path>`: the staging file goes to the
-#: user, who then copies it to the path.
-COPY_AS = r"""chown "$1" -- "$2" || exit 1
-exec /bin/sh -c "$3" sps-user "$1" /bin/sh -c \
+#: user, who then copies it to the path. The staging file is removed however this ends. It ends 126
+#: for a user the sandbox does not have and 125 when the lookup itself failed.
+COPY_AS = r"""trap 'rm -f -- "$2"' EXIT
+getent passwd "$1" >/dev/null 2>&1
+c=$?
+[ "$c" -eq 0 ] || { [ "$c" -eq 2 ] && exit 126; exit 125; }
+chown "$1" -- "$2" || exit 1
+/bin/sh -c "$3" sps-user "$1" /bin/sh -c \
   'mkdir -p -- "$(dirname -- "$2")" && cat -- "$1" >"$2"' sps-copy "$2" "$4"
 """
 
@@ -143,33 +146,26 @@ def stage_dir() -> str:
 
 def wrapped(stage: str, request: RunRequest) -> list[str]:
     """The argument vector that runs `request` inside the wrapper."""
+    limit = request.output_limit_bytes
     return [
-        "bash",
+        "sh",
         "-c",
         WRAPPER,
         "sps-run",
         stage,
         request.cwd or "",
         request.user or "",
-        str(request.output_limit_bytes),
-        str(INLINE),
-        SWITCH,
+        str(min(limit, INLINE)),
+        str(limit),
+        *([SWITCH] if request.user else []),
         *request.argv,
     ]
-
-
-def _frame(line: str) -> tuple[int, bytes | None]:
-    """One stream line, `<size> <base64>` or `<size> @` (kept in its file)."""
-    size, _, rest = line.partition(" ")
-    if not size.isdecimal():
-        raise ValueError(line[:40])
-    return int(size), (None if rest == "@" else base64.b64decode(rest, validate=True))
 
 
 async def _remove(p: BlaxelProvider, sandbox_id: str, stage: str) -> None:
     """Best effort: what is left behind ends with the sandbox."""
     try:
-        await p.quick(sandbox_id, ["rm", "-rf", "--", stage])
+        await p.quick(sandbox_id, ["rm", "-f", "--", f"{stage}.o", f"{stage}.e"])
     except SpsError:
         pass
 
@@ -227,8 +223,8 @@ async def _after_timeout(
     """What the two files hold when Blaxel's timeout ended the wrapper before it answered."""
     limit = request.output_limit_bytes
     try:
-        out = await _staged(p, sandbox_id, f"{stage}/o", limit + 1)
-        err = await _staged(p, sandbox_id, f"{stage}/e", limit + 1)
+        out = await _staged(p, sandbox_id, f"{stage}.o", limit + 1)
+        err = await _staged(p, sandbox_id, f"{stage}.e", limit + 1)
     except SpsError:
         out = err = b""
     await _remove(p, sandbox_id, stage)
@@ -243,43 +239,45 @@ async def run(p: BlaxelProvider, sandbox_id: str, request: RunRequest) -> RunRes
         raise SpsError("invalid_request", "argv must not be empty")
     stage = stage_dir()
     _, logs, timed_out = await p.execute(
-        sandbox_id, wrapped(stage, request), request.env, request.timeout_ms
+        sandbox_id, wrapped(stage, request), request.env, request.timeout_ms, after_timeout=False
     )
     if timed_out:
         return await _after_timeout(p, sandbox_id, stage, request)
-    text = str(logs["stdout"])
-    first = text.split("\n", 1)[0]
-    if first == NO_USER:
+    header, _, rest = str(logs["stdout"]).partition("\n")
+    words = header.split(" ")
+    if words[0] == NO_USER:
         raise SpsError("not_found", "The sandbox has no such user")
-    if first == NO_CWD:
+    if words[0] == NO_CWD:
         raise SpsError("not_found", f"No such directory: {request.cwd}")
-    if first.startswith(NO_TOOL) or first == NO_STAGE:
+    if words[0] in (NO_TOOL, NO_STAGE):
         raise SpsError(
             "provider_error", "The sandbox lacks a tool that exact output needs", outcome="failed"
         )
-    lines = text.split("\n")
-    if len(lines) < 3 or not first.lstrip("-").isdecimal():
+    limit = request.output_limit_bytes
+    n = min(limit, INLINE)
+    try:
+        if len(words) != 4 or not all(w.isdecimal() for w in words[:3]):
+            raise ValueError(header[:40])
+        code, out_size, err_size = (int(w) for w in words[:3])
+        kept = words[3] == "KEEP"
+        raw = base64.b64decode(rest)  # the lines of its wrapping are skipped
+        out_at = min(out_size, n)
+        if len(raw) != out_at + min(err_size, n):
+            raise ValueError("size")
+    except (ValueError, binascii.Error):
         raise SpsError(
             "provider_error", "The command ended without its answer", outcome="unknown"
         ) from None
+    out, err = raw[:out_at], raw[out_at:]
     try:
-        out_size, out = _frame(lines[1])
-        err_size, err = _frame(lines[2])
-    except (ValueError, binascii.Error):
-        raise SpsError(
-            "provider_error", "The command's answer is unreadable", outcome="unknown"
-        ) from None
-    kept = len(lines) > 3 and lines[3] == "KEEP"
-    try:
-        limit = request.output_limit_bytes
-        if out is None:
-            out = await _staged(p, sandbox_id, f"{stage}/o", limit)
-        if err is None:
-            err = await _staged(p, sandbox_id, f"{stage}/e", limit)
+        if out_size > n < limit:  # a stream over INLINE that the limit allows more of
+            out = await _staged(p, sandbox_id, f"{stage}.o", limit)
+        if err_size > n < limit:
+            err = await _staged(p, sandbox_id, f"{stage}.e", limit)
     finally:
         if kept:
             await _remove(p, sandbox_id, stage)
-    return _result(request, int(first), out, err, out_size, err_size)
+    return _result(request, code, out, err, out_size, err_size)
 
 
 async def write_as(
@@ -294,18 +292,21 @@ async def write_as(
 
     The bytes go to a private staging file first, which the user then copies to `path` (creating
     missing parent directories), so the file is made by the user: it is owned by them, and it is
-    refused where they may not write. The staging file is removed either way.
+    refused where they may not write. One command checks that the user exists, copies, and removes
+    the staging file either way.
     """
     check_user(user)
-    await p.require_user(sandbox_id, user)
     stage = f"{STAGE}{uuid4().hex}"
     await p.write_raw(sandbox_id, stage, data, size=size, mode="0600")
     try:
         code, err = await p.quick(
             sandbox_id, ["/bin/sh", "-c", COPY_AS, "sps-write", user, stage, SWITCH, path]
         )
-    finally:
-        await _remove(p, sandbox_id, stage)
+    except SpsError:
+        await _remove(p, sandbox_id, stage)  # the command may have ended before its own cleanup
+        raise
+    if code == 126:
+        raise SpsError("not_found", "The sandbox has no such user")
     if code != 0:
         if "ermission denied" in err or "Read-only" in err:
             raise SpsError("forbidden", f"{user} may not write {path}")

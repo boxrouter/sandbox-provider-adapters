@@ -46,7 +46,9 @@ from sandbox_provider_spec.v1 import (
     PreparedImage,
     PrivateOciSource,
     SpsError,
+    waiting,
 )
+from sandbox_provider_spec.v1.timing import lookup
 
 from sps_provider_blaxel import dockerfile, wire
 
@@ -365,7 +367,7 @@ async def _settled(p: BlaxelProvider, name: str) -> None:
         native = await _native(p, name)
         if native is None or native["status"] not in _BUILDING:
             return
-        await asyncio.sleep(0.5)
+        await waiting.pause(0.5)
     raise SpsError("timeout", "The image's record did not settle", outcome="unknown")
 
 
@@ -396,6 +398,8 @@ async def delete(p: BlaxelProvider, image_id: str) -> ImageDeleteResult:
     native = await _native(p, image_id)
     if native is None or not is_record(native):
         raise SpsError("not_found", "Blaxel holds no such image")
+    p._resolved.pop(image_id, None)
+    p._image_users.pop(image_id, None)
     where = quote(image_id, safe="")
     repeat = _deleted(native)
     if native["status"] in _BUILDING:
@@ -417,16 +421,27 @@ async def delete(p: BlaxelProvider, image_id: str) -> ImageDeleteResult:
 
 
 async def resolve(p: BlaxelProvider, image_id: str) -> str:
-    """The reference that `create` hands Blaxel for a prepared image: `sandbox/<name>:<tag>`."""
-    native = await _record(p, image_id)
-    image = await _image(p, image_id)
+    """The reference that `create` hands Blaxel for a prepared image: `sandbox/<name>:<tag>`.
+
+    A built image's tag never changes for its id (a rebuild takes a new idempotency key and so a
+    new name), so an id once resolved is remembered on the provider; `create` forgets it when
+    Blaxel refuses it."""
+    artifact = p._resolved.get(image_id)
+    if artifact is not None:
+        return artifact
+    # The reads that find the record and the tag only resolve the handle a create needs: the
+    # lookup phase, not the create.
+    with lookup():
+        native = await _record(p, image_id)
+        image = await _image(p, image_id)
     if image is None or (image.get("metadata") or {}).get("status") != "BUILT":
         raise SpsError("conflict", "The image is not ready")
     tag = _tag(image)
     if tag is None:
         raise SpsError("conflict", "The image has no built tag")
     del native
-    return f"sandbox/{image_id}:{tag}"
+    artifact = p._resolved[image_id] = f"sandbox/{image_id}:{tag}"
+    return artifact
 
 
 async def prepare(
@@ -447,13 +462,17 @@ async def prepare(
         if context is not None:
             raise SpsError("invalid_request", "Only a Dockerfile takes a context", field="context")
         text = dockerfile.from_oci(source.oci, source.config, name_of(key))
+        user = source.config.user or ""
     elif isinstance(source, DockerfileSource):
-        text = dockerfile.from_dockerfile(
-            source.dockerfile, source.base.config if source.base else None, name_of(key)
-        )
+        base = source.base.config if source.base else None
+        text = dockerfile.from_dockerfile(source.dockerfile, base, name_of(key))
+        user = dockerfile.user_of(dockerfile.steps(source.dockerfile), base)
     else:
         raise SpsError("invalid_request", "The source is an image or a Dockerfile", field="source")
     name = name_of(key)
+    # The sandbox's default exec user: sandboxes from this image run the fs daemon as root no
+    # matter the USER, so the files endpoints are usable only when this is root.
+    p._image_users[name] = "root" if dockerfile.root(user) else user
     await sweep(p)
     spool, digest = await _spool(context, context_size)
     try:

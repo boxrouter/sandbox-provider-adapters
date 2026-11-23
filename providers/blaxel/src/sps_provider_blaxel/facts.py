@@ -36,14 +36,26 @@ BASE_IMAGE = "blaxel/base-image:latest"
 MIN_LIFETIME_S = (
     300  # https://docs.blaxel.ai/Sandboxes/Expiration: "The minimum value for `ttl` is `5m`"
 )
-MAX_RUN_S = 600  # a waited command; a longer one is followed by polling its process
+# The longest `run`: one waited request, followed by its name after Blaxel's gateway cuts it near
+# 120 s. An hour, as the other spec packages: with 600 s, a caller's 600 s command plus its kill
+# margin went past it, so Core started a process and polled its output (two reads a pass, pauses
+# up to 2 s) instead of one waited request.
+MAX_RUN_S = 3600
 MAX_WAIT_S = 30  # one process_output call waits at most this long for new output
 LIST_LIMIT = 100
 FILE_BYTES = 1 << 30
-# Blaxel's hourly metrics lag the usage; 2026-10-20 evidence: final 45 to 113 s after destroy.
-COST_FINAL_WITHIN_S = 900
+# How long after a sandbox's end Blaxel's metrics may still lack or change its cost. Live through
+# Cloud on 2026-11-23: buckets 0 to 7 s after the destroy, unchanged afterwards (40 sandboxes, 30
+# at once); 2026-10-20: final 45 to 113 s after the destroy. The one read at this time plus the
+# spec's 30 s grace (pricing's `final_after_s`) is final.
+COST_FINAL_WITHIN_S = 120
 # Blaxel's own label on every sandbox this adapter creates: the create's idempotency marker.
 LABEL_BODY = "sps-body"
+# The directory a default command and the filesystem daemon resolve a relative path against on
+# the provider's default image (the spec tester's `default_cwd` observation). It depends on the
+# image and the user — Cloud's image starts in `/home/user` — so a relative path that needs an
+# anchor asks the sandbox for it (`files_list`'s `..` case); this constant is the declaration
+# only and is not used to resolve a path.
 CWD = "/blaxel"
 RESERVED_PORT = 8080  # Blaxel keeps it for its sandbox API: a preview of it never reaches a program
 
@@ -139,6 +151,10 @@ def build_discovery(offered_regions: Iterable[str] | None = None) -> Discovery:
         gates={
             "custom_images": list(CUSTOM_IMAGES),
             "idle_shutdown": [{"on_idle": "paused"}],
+            # `pause_resume` is NOT claimed (withdrawn 2026-11-23): `POST /standby` and `POST
+            # /resume` are served by the sandbox-api inside the sandbox from 0.2.78 on, and the
+            # images this adapter prepares carried 0.2.74, so every sandbox made from one answered
+            # 404. `pause` and `resume` stay in the package and answer `unsupported` there.
             "processes": [{"input": True, "cancel": True, "reattach": True}],
             "previews": [
                 {

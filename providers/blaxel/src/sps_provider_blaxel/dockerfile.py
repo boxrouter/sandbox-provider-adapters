@@ -19,6 +19,7 @@ An OCI source is the same recipe over one `FROM`.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shlex
@@ -27,7 +28,7 @@ from dataclasses import dataclass
 from sandbox_provider_spec.v1 import ImageConfig, SpsError
 
 SANDBOX_API_IMAGE = "ghcr.io/blaxel-ai/sandbox"
-SANDBOX_API_VERSION = "0.2.74"
+SANDBOX_API_VERSION = "0.2.81"  # 0.2.78 is the first with POST /standby and /resume
 SANDBOX_API_PATH = "/usr/local/bin/sandbox-api"
 BLAXEL_TOML = "[build]\nslim = false\n"
 _USER = re.compile(r"[a-zA-Z0-9_.-]+(?::[a-zA-Z0-9_.-]+)?")
@@ -128,7 +129,7 @@ def tail(user: str, command: list[str] | None, mark: str = "") -> list[str]:
     if user and not _USER.fullmatch(user):
         raise SpsError("invalid_request", "The image's USER is not a name or an id", field="source")
     argv = [SANDBOX_API_PATH]
-    nonroot = bool(user and user.split(":")[0] not in {"root", "0"})
+    nonroot = not root(user)
     if nonroot:
         argv += ["--user", user]
     if command:
@@ -151,6 +152,26 @@ def tail(user: str, command: list[str] | None, mark: str = "") -> list[str]:
     ]
 
 
+def recipe_revision() -> str:
+    """What this adapter adds to every image it prepares, as 12 hex characters: a digest of the
+    tail that `tail` writes, in both forms (root, and a named user with a startup command and a
+    mark), so it holds the pinned `sandbox-api` image and version and the template, and changes
+    when one of them does and only then."""
+    shapes = [tail("", None), tail("user", ["command"], "mark")]
+    return hashlib.sha256(json.dumps(shapes).encode()).hexdigest()[:12]
+
+
+def root(user: str) -> bool:
+    """Whether a USER value runs as root (`tail` passes anything else to `sandbox-api --user`)."""
+    return not user or user.split(":")[0] in {"root", "0"}
+
+
+def user_of(structure: list[Step], base: ImageConfig | None) -> str:
+    """The USER a Dockerfile's build ends with: its last USER instruction, or the base's."""
+    users = [s.value for s in structure if s.keyword == "USER"]
+    return users[-1] if users else (base.user if base and base.user else "")
+
+
 def from_dockerfile(text: str, base: ImageConfig | None, mark: str = "") -> str:
     """The Dockerfile to build for a customer's recipe. `base` is the caller's resolution of the
     single `FROM`; Blaxel's builder reads no registry for us, so it supplies the image's user."""
@@ -161,8 +182,7 @@ def from_dockerfile(text: str, base: ImageConfig | None, mark: str = "") -> str:
             "Blaxel builds a Dockerfile that starts with its one FROM instruction",
             field="source",
         )
-    users = [s.value for s in structure if s.keyword == "USER"]
-    user = users[-1] if users else (base.user if base and base.user else "")
+    user = user_of(structure, base)
     body = "\n".join(s.raw for s in structure)
     return body + "\n" + "\n".join(tail(user, startup(structure), mark)) + "\n"
 

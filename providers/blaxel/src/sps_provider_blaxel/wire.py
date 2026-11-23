@@ -7,6 +7,7 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
+from typing import Any
 
 import httpx
 from sandbox_provider_spec.v1 import SandboxState, SpsError
@@ -56,6 +57,18 @@ def sandbox_state(status: str, state: str | None) -> SandboxState:
         # Blaxel's idle sleep keeps memory and wakes on the next call; SPS calls it paused.
         return "paused" if state == "STANDBY" else "running"
     return "stopped"  # ARCHIVED, ARCHIVING and the like
+
+
+def last_used(native: dict[str, Any]) -> datetime | None:
+    """The record's `lastUsedAt`: Blaxel's own time (whole seconds) of the last request to the
+    sandbox's host. A standby that a request caused carries that request's own second (live:
+    POST `Date` :56 and `lastUsedAt` :56), so a STANDBY record dated before a call that woke or
+    paused the sandbox is the record of an earlier standby, not of this one."""
+    value = native.get("lastUsedAt")
+    try:
+        return stamp(value) if isinstance(value, str) else None
+    except ValueError:
+        return None
 
 
 def retry_after(response: httpx.Response) -> int | None:
