@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Groundbox
+# SPDX-License-Identifier: PolyForm-Shield-1.0.0
+provider_id: groundbox
+name: Groundbox
+spec_version: "1.0"
+credential_fields:
+  - name: api_key
+    secret: true
+    public_prefix: gbx_
+    description: "API key from the Groundbox dashboard, with the sandboxes:read and sandboxes:write scopes"
+api_domains: [api.groundbox.dev]
