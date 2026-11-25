@@ -32,7 +32,7 @@
 
 An endpoint folder (`endpoint.yaml`, no package) has no code to read, so review the file itself:
 
-1. `provider_id` equals the folder name, which matches `^[a-z0-9-]{2,32}$`; `spec_version` is `"1.0"`; `name` is the provider's own.
+1. `provider_id` equals the folder name, which matches `^[a-z0-9-]{2,32}$`; `spec_version` is `"1.1"`; `name` is the provider's own.
 2. `base_url` is the provider's own HTTPS server, a public DNS name off the shared-hosting
    suffixes. `checks.yml` refuses an IP address, `localhost`, user info, a query, a fragment, a
    trailing slash and a shared-hosting host; confirm the host belongs to the provider.

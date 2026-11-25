@@ -130,7 +130,7 @@ def test_manifest_with_missing_field_and_shared_suffix_fails(repo: Repo) -> None
         bump_version(r)
         r.write(
             MANIFEST,
-            "provider_id: acme\nname: Acme\nspec_version: '1.0'\n"
+            "provider_id: acme\nname: Acme\nspec_version: '1.1'\n"
             "api_domains: [api.acme.test, .s3.amazonaws.com]\n",
         )
 
@@ -167,7 +167,7 @@ def test_stale_codeowners_fails(repo: Repo) -> None:
 
 ENDPOINT = "providers/pingo/endpoint.yaml"
 ENDPOINT_TEXT = (
-    "provider_id: pingo\nname: Pingo\nspec_version: '1.0'\nbase_url: https://api.pingo.test/box\n"
+    "provider_id: pingo\nname: Pingo\nspec_version: '1.1'\nbase_url: https://api.pingo.test/box\n"
 )
 TWO_OWNERS = "* @boxrouter/maintainers\n/providers/acme/ @acme-dev\n/providers/pingo/ @pingo-dev\n"
 
@@ -227,7 +227,7 @@ def test_endpoint_field_problems_fail(repo: Repo) -> None:
         "pingo: endpoint.yaml has an unknown field x\n"
         "pingo: endpoint.yaml provider_id is 'other'\n"
         "pingo: endpoint.yaml name is empty\n"
-        "pingo: endpoint.yaml spec_version must be '1.0'\n",
+        "pingo: endpoint.yaml spec_version must be '1.1', found 1.0 (Provider API 1.1 requires cost)\n",
     )
 
 
@@ -347,3 +347,29 @@ def test_the_export_app_may_change_a_folder_boxrouter_maintains(repo: Repo) -> N
 
 def test_without_a_pr_author_nothing_is_refused_for_ownership(repo: Repo) -> None:
     assert owned_check(repo, None, change_acme).code == 0
+
+
+def test_a_manifest_that_states_1_0_fails_because_1_1_requires_cost(repo: Repo) -> None:
+    def change(r: Repo) -> None:
+        bump_version(r)
+        r.edit(MANIFEST, 'spec_version: "1.1"', 'spec_version: "1.0"')
+
+    outcome = repo.check(change)
+    assert (outcome.code, outcome.stderr) == (
+        1,
+        "acme: sps-provider.yaml spec_version must be '1.1', found '1.0' "
+        "(Provider API 1.1 requires cost)\n",
+    )
+
+
+def test_a_folder_boxrouter_publishes_keeps_its_own_spec_version(repo: Repo) -> None:
+    repo.write("policy/cloud-owned-providers.txt", "acme\n")
+    repo.git("add", "-A")
+    repo.git("commit", "-q", "-m", "acme is published from BoxRouter's source")
+
+    def change(r: Repo) -> None:
+        bump_version(r)
+        r.edit(MANIFEST, 'spec_version: "1.1"', 'spec_version: "1.0"')
+
+    outcome = repo.check(change)  # the export's own check: no --pr-author
+    assert (outcome.code, outcome.stdout, outcome.stderr) == (0, OK, "")
