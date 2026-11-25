@@ -7,7 +7,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sps-provider-example"
-version = "0.3.2"
+version = "0.3.3"
 description = "The template provider adapter: a 1.0 Provider over Example Cloud"
 readme = "README.md"
 license = "LicenseRef-PolyForm-Shield-1.0.0"

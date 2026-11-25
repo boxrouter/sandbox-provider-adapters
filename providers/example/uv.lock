@@ -618,7 +618,7 @@ provides-extras = ["blaxel", "browser", "daytona", "docker", "e2b", "http", "mod
 
 [[package]]
 name = "sps-provider-example"
-version = "0.3.2"
+version = "0.3.3"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },

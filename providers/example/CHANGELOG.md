@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.3
+
+- States Provider API 1.1, which requires `cost`; the example already offers it (`usage` costs: the quantities from Example Cloud's records), so only `spec_version` changes in the manifest and static discovery.
+
 ## 0.3.2
 
 - Vendor the SPS 0.5.86 wheel (the current release; its own tests include the Sail launch-state fix and the provider assets since 0.5.62); `uv.lock` follows. The Blaxel folder's tests run against this wheel.
