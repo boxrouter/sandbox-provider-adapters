@@ -144,14 +144,30 @@ def check_version(root: Path, base: str, provider: str, new: str) -> list[str]:
 
 MANIFEST_FIELDS = ("provider_id", "name", "spec_version", "credential_fields", "api_domains")
 
+#: The Provider API version a contributed provider states: the newest minor. 1.1 requires `cost`,
+#: which BoxRouter needs to offer a provider to customers who pay with credits, not only to those
+#: who bring their own key. A folder BoxRouter publishes from its own source is exempt.
+SPEC_VERSION = "1.1"
 
-def check_manifest(provider: str, manifest: dict, shared: list[str]) -> list[str]:
+
+def check_spec_version(provider: str, document: dict, name: str) -> list[str]:
+    if "spec_version" not in document or document["spec_version"] == SPEC_VERSION:
+        return []
+    return [
+        f"{provider}: {name} spec_version must be {SPEC_VERSION!r}, found "
+        f"{document['spec_version']!r} (Provider API {SPEC_VERSION} requires cost)"
+    ]
+
+
+def check_manifest(provider: str, manifest: dict, shared: list[str], owned: bool = False) -> list[str]:
     """Check `sps-provider.yaml`: an `api_domains` entry is an exact host or a `.suffix`."""
     failures = [
         f"{provider}: sps-provider.yaml is missing {field}"
         for field in MANIFEST_FIELDS
         if field not in manifest
     ]
+    if not owned:
+        failures += check_spec_version(provider, manifest, "sps-provider.yaml")
     domains = manifest.get("api_domains") or []
     suffixes = [d for d in domains if d.startswith(".")]
     hosts = [d for d in domains if not d.startswith(".")]
@@ -230,8 +246,7 @@ def check_endpoint(root: Path, provider: str, shared: list[str]) -> list[str]:
         failures.append(f"{provider}: {ENDPOINT} provider_id is {endpoint['provider_id']!r}")
     if "name" in endpoint and not (isinstance(endpoint["name"], str) and endpoint["name"].strip()):
         failures.append(f"{provider}: {ENDPOINT} name is empty")
-    if "spec_version" in endpoint and endpoint["spec_version"] != "1.0":
-        failures.append(f"{provider}: {ENDPOINT} spec_version must be '1.0'")
+    failures += check_spec_version(provider, endpoint, ENDPOINT)
     if "base_url" in endpoint:
         failures += check_base_url(provider, endpoint["base_url"], shared)
     return failures + check_owners(root, provider)
@@ -255,7 +270,7 @@ def check_codeowners(root: Path) -> list[str]:
 
 
 def check_folder(
-    root: Path, base: str, provider: str, policy: dict, shared: list[str]
+    root: Path, base: str, provider: str, policy: dict, shared: list[str], owned: bool = False
 ) -> list[str]:
     folder = root / "providers" / provider
     if not PROVIDER_ID.fullmatch(provider):
@@ -273,7 +288,7 @@ def check_folder(
     manifests = sorted(folder.glob("src/*/sps-provider.yaml"))
     if manifests:
         manifest = yaml.safe_load(manifests[0].read_text()) or {}
-        failures += check_manifest(provider, manifest, shared)
+        failures += check_manifest(provider, manifest, shared, owned)
         if manifest.get("provider_id") != provider:
             failures.append(
                 f"{provider}: sps-provider.yaml provider_id is {manifest.get('provider_id')!r}"
@@ -320,8 +335,9 @@ def run_checks(
     folders = [f for f in folders if f in provider_dirs(root)]  # a deleted folder has no checks
     policy = yaml.safe_load((root / "policy/allowed-dependencies.yaml").read_text()) or {}
     shared = (root / "policy/shared-hosting-suffixes.txt").read_text().split()
+    owned = cloud_owned(root)
     for provider in folders:
-        failures += check_folder(root, base, provider, policy, shared)
+        failures += check_folder(root, base, provider, policy, shared, provider in owned)
     return failures + check_codeowners(root), len(folders)
 
 

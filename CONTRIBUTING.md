@@ -13,7 +13,14 @@ The [implement guide](https://boxrouter.ai/docs/providers/implement) takes a pro
 ## Add a provider
 
 An adapter implements the [Sandbox Provider Spec](https://github.com/boxrouter/sandbox-provider-spec)
-(SPS) 1.0 operations over the provider's own API.
+(SPS) operations over the provider's own API, and states the newest Provider API version, 1.1, as
+`spec_version`.
+
+1.1 requires `cost`: what each sandbox cost, from your own records. BoxRouter bills from it, so it
+is what lets BoxRouter offer your provider to customers who pay with BoxRouter credits, as well as
+to those who connect their own account with you. The least it takes is the quantities each sandbox
+used (`source: usage`, no prices); see [Cost](https://github.com/boxrouter/sandbox-provider-spec/blob/main/docs/implement.md#cost).
+`checks.yml` refuses another `spec_version`, and checks that a stated static discovery offers cost.
 
 1. Copy `providers/example/` to `providers/<provider>/`. It is the working template, with its own
    README that shows how to run it. Rename the package and the provider id in `pyproject.toml`
@@ -41,12 +48,12 @@ A folder name, `provider_id` and entry-point name match `^[a-z0-9-]{2,32}$`, the
 
 ## Add a native endpoint
 
-A provider that already runs its own SPS 1.0 server registers it with a folder that has no
+A provider that already runs its own SPS server, with `cost`, registers it with a folder that has no
 package:
 
 ```text
 providers/<provider>/
-├── endpoint.yaml    # provider_id, name, spec_version: "1.0", base_url
+├── endpoint.yaml    # provider_id, name, spec_version: "1.1", base_url
 ├── OWNERS
 └── brand/           # optional
 ```
