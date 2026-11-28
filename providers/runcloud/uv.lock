@@ -400,14 +400,14 @@ wheels = [
 
 [[package]]
 name = "sandbox-provider-spec"
-version = "0.5.62"
-source = { path = "vendor/sandbox_provider_spec-0.5.62-py3-none-any.whl" }
+version = "0.5.86"
+source = { path = "vendor/sandbox_provider_spec-0.5.86-py3-none-any.whl" }
 dependencies = [
     { name = "jsonschema" },
     { name = "pyyaml" },
 ]
 wheels = [
-    { filename = "sandbox_provider_spec-0.5.62-py3-none-any.whl", hash = "sha256:7b656661f283f9ac998160c6433bdedbcc7369abb4ebdf9e95b0193d0beb0097" },
+    { filename = "sandbox_provider_spec-0.5.86-py3-none-any.whl", hash = "sha256:78ddabaadb5a6745e213876831159ae359f8fd1db633233f170bbab8004b1f67" },
 ]
 
 [package.optional-dependencies]
@@ -456,12 +456,12 @@ tools = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = "==0.28.1" },
-    { name = "sandbox-provider-spec", path = "vendor/sandbox_provider_spec-0.5.62-py3-none-any.whl" },
+    { name = "sandbox-provider-spec", path = "vendor/sandbox_provider_spec-0.5.86-py3-none-any.whl" },
 ]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = "==9.1.1" }]
-tools = [{ name = "sandbox-provider-spec", extras = ["http"], path = "vendor/sandbox_provider_spec-0.5.62-py3-none-any.whl" }]
+tools = [{ name = "sandbox-provider-spec", extras = ["http"], path = "vendor/sandbox_provider_spec-0.5.86-py3-none-any.whl" }]
 
 [[package]]
 name = "typing-extensions"

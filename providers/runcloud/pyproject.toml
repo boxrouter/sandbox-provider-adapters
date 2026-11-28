@@ -30,7 +30,7 @@ tools = [
 ]
 
 [tool.uv.sources]
-sandbox-provider-spec = { path = "vendor/sandbox_provider_spec-0.5.62-py3-none-any.whl" }
+sandbox-provider-spec = { path = "vendor/sandbox_provider_spec-0.5.86-py3-none-any.whl" }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/sps_provider_runcloud"]

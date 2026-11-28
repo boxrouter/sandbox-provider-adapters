@@ -12,4 +12,4 @@ credential_fields:
     required: false
     default: "https://api.run.cloud"
     description: "run.cloud API base URL"
-api_domains: [api.run.cloud, api-dev.run.cloud]
+api_domains: [api.run.cloud]
