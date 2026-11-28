@@ -12,8 +12,10 @@ Each operation maps to the run.cloud REST API under `/run-cloud/sandboxes`:
 - `run` and the process operations exec a supervisor script in the sandbox (`guest.py`), because
   run.cloud's exec call holds the HTTP request for the whole command and returns output as text.
 - `files.read` and `files.write` move the file through `POST .../fs` in 512 KiB chunks.
-- `cost` reads `GET .../usage` (billed seconds) and the sandbox's CPU counter, and reports usage
-  quantities; discovery holds the list prices.
+- `cost` reads `GET .../cost`, which states the billed amount per meter (source `reported`), final
+  once the destroyed sandbox is fully metered and readable for 30 days. Where that endpoint is not
+  deployed it falls back to `GET .../usage` (billed seconds) and the sandbox's CPU counter, and
+  reports usage quantities; discovery holds the list prices.
 """
 
 from __future__ import annotations
@@ -76,6 +78,7 @@ from sps_provider_runcloud.facts import (
 from sps_provider_runcloud.guest import ROOT, SUPERVISOR
 
 BASE = "/run-cloud/sandboxes"
+NANODOLLARS_PER_USD = Decimal(1_000_000_000)
 NAME_PREFIX = "sps-"
 START_TIMEOUT_S = 11 * 60
 NOT_ENDED = {"running", "paused", "stopped", "interrupted", "archived", "pending", "starting"}
@@ -95,7 +98,7 @@ _STATES = {
 
 
 def _time(text: str) -> datetime:
-    return datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(UTC)
+    return datetime.fromisoformat(text).astimezone(UTC)
 
 
 def _fingerprint(request: CreateRequest, plan: Mapping[str, Any]) -> str:
@@ -709,6 +712,37 @@ class RuncloudProvider(Provider):
         )
 
     async def cost(self, sandbox_id: str, *, created_at: datetime | None = None) -> Cost:
+        # `GET .../cost` states the billed amounts per meter (what run.cloud invoices), final once
+        # the destroyed sandbox is fully metered and readable for 30 days after. A deployment
+        # without that endpoint answers 404 there, and the usage estimate below stands in.
+        resp = await self._req("GET", self._path(sandbox_id, "/cost"), ok=(404,))
+        if resp.status_code == 404:
+            return await self._usage_cost(sandbox_id)
+        doc = resp.json()
+        final = doc["status"] == "final"
+        start = _time(doc["startedAt"])
+        end = _time(doc["endedAt"]) if final and doc.get("endedAt") else None
+        lines = tuple(
+            CostLine(
+                "memory" if line["meter"] == "memory" else "cpu",
+                Decimal(line["nanodollars"]) / NANODOLLARS_PER_USD,
+                Decimal(line["quantity"]),
+                line["unit"],
+                start,
+                end,
+            )
+            for line in doc["lines"]
+        )
+        return Cost(
+            sandbox_id=sandbox_id,
+            status="final" if final else "accruing",
+            total_usd=Decimal(doc["totalUsd"]),
+            source="reported",
+            lines=lines,
+            as_of=_time(doc["asOf"]),
+        )
+
+    async def _usage_cost(self, sandbox_id: str) -> Cost:
         # Billed seconds come from run.cloud's usage ledger; the reservation, the CPU counter and
         # the end time from the sandbox. `as_of` is run.cloud's clock (the response's Date).
         raw = await self._sandbox(sandbox_id)

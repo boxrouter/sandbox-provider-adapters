@@ -17,6 +17,7 @@ import subprocess
 import sys
 import uuid
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from email.utils import format_datetime
 from pathlib import Path
 from typing import Any
@@ -52,6 +53,7 @@ class FakeRunCloud:
         self.creates: list[dict[str, Any]] = []
         self.now = datetime(2026, 11, 22, 10, 0, tzinfo=UTC)
         self.billed_seconds = 100
+        self.costs: dict[str, dict[str, Any]] | None = None  # None: a deployment without /cost
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         if request.headers.get("authorization") != f"Bearer {TOKEN}":
@@ -63,6 +65,10 @@ class FakeRunCloud:
             if request.method == "POST":
                 return self._create(request)
             return self._list(request)
+        if parts[3:] == ["cost"]:
+            if self.costs is not None and parts[2] in self.costs:
+                return httpx.Response(200, json=self.costs[parts[2]])
+            return httpx.Response(404, json={"error": "Not found"})
         box = self.sandboxes.get(parts[2])
         if box is None:
             return httpx.Response(404, json={"error": "Not found"})
@@ -384,5 +390,47 @@ def test_cost_reports_usage_and_turns_final(cloud: FakeRunCloud) -> None:
         cloud.now += timedelta(seconds=300)
         final = await p.cost(sid)
         assert final.status == "final" and all(line.end is not None for line in final.lines)
+
+    go(main())
+
+
+def test_cost_reads_the_billed_record_and_falls_back_without_it(cloud: FakeRunCloud) -> None:
+    async def main() -> None:
+        p, sid = await _created(cloud, resources={"cpu_min": 1})
+        cloud.costs = {}
+        assert (await p.cost(sid)).source == "usage"  # no record: the usage estimate
+        cloud.costs[sid] = {
+            "sandboxId": sid,
+            "status": "final",
+            "currency": "USD",
+            "totalNanodollars": "1234567",
+            "totalUsd": "0.001234567",
+            "lines": [
+                {"meter": "cpu", "nanodollars": "246000", "quantity": "100", "unit": "vcpu_second"},
+                {
+                    "meter": "memory",
+                    "nanodollars": "988567",
+                    "quantity": "200.5",
+                    "unit": "gib_second",
+                },
+                {"meter": "cpu_burst", "nanodollars": "0", "quantity": "0", "unit": "vcpu_second"},
+            ],
+            "startedAt": "2026-11-22T10:00:00.000Z",
+            "endedAt": "2026-11-22T10:05:00.000Z",
+            "meteredThrough": "2026-11-22T10:05:00.000Z",
+            "asOf": "2026-11-22T10:07:00.000Z",
+            "availableUntil": "2026-12-22T10:07:00.000Z",
+        }
+        del cloud.sandboxes[sid]  # pruned: only the retained record answers
+        cost = await p.cost(sid)
+        assert (cost.status, cost.source, cost.total_usd) == (
+            "final",
+            "reported",
+            Decimal("0.001234567"),
+        )
+        assert [line.item for line in cost.lines] == ["cpu", "memory", "cpu"]
+        assert sum(line.amount_usd for line in cost.lines) == cost.total_usd
+        assert cost.lines[1].quantity == Decimal("200.5") and cost.lines[1].unit == "gib_second"
+        assert all(line.end == datetime(2026, 11, 22, 10, 5, tzinfo=UTC) for line in cost.lines)
 
     go(main())
